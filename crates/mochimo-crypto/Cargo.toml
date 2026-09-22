@@ -220,6 +220,36 @@ argon2 = { version = "0.5", default-features = false, features = ["zeroize"], op
 # in-place detached API needs no `alloc`.
 chacha20poly1305 = { version = "0.10", default-features = false, optional = true }
 
+# THE WINDOWS INTERFACES, and only on Windows: a target-specific dependency is
+# not in the graph of any Unix build, so Linux and macOS compile exactly what
+# they compiled before this line existed.
+#
+# `windows-sys` and not `windows`: raw declarations generated from Microsoft's
+# metadata, with no wrapper layer between the call and the argument argued at
+# it. The call sites are few and each is in a file that says why it cannot be
+# done through `std`. The higher-level `windows` crate would add COM plumbing
+# and a second crate family for calls that are plain C functions.
+#
+# ALREADY IN `Cargo.lock`, which is the whole cost argument: 0.61.2 arrives
+# under `trybuild`'s `termcolor` and `winapi-util`, so a direct dependency on
+# it adds no crate to the lockfile and no licence to `deny.toml`'s walk (MIT OR
+# Apache-2.0, both allowed). What it does change is which builds compile it:
+# measured with `cargo tree -p mochimo-crypto --features mesh-https --target
+# x86_64-pc-windows-msvc -e normal`, the shipped binary's graph held no
+# `windows-sys` at all before this, because `ring` takes its 0.52 only on
+# aarch64 Windows. So this puts 0.61.2 and `windows-link` into every Windows
+# wallet build, and on aarch64 Windows the binary links both versions.
+#
+# The features are the modules the call sites import and nothing wider, one
+# line of argument each:
+#
+# * `Win32_Foundation` -- the two error codes `keystore::medium` names when a
+#   replacing move is refused by a held file, read from the generated
+#   constants rather than retyped, by the rule `consts` states for protocol
+#   constants.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
+
 # The shipped binary. Built with `mesh-https`, so it links rustls and
 # `ring`'s C; the board builds and drives it in a subprocess through
 # `tests/cli.rs`'s pty harness (see the note below `required-features`).

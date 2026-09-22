@@ -117,10 +117,11 @@ impl Medium for Disk {
     }
 
     fn rename(&mut self, synced: Synced, dir: &Path) -> Result<Renamed> {
-        fs::rename(&synced.path, dir.join(SNAPSHOT_NAME)).map_err(io("rename"))?;
+        fs::rename(&synced.path, dir.join(SNAPSHOT_NAME)).map_err(rename_refusal)?;
         Ok(Renamed { _private: () })
     }
 
+    #[cfg(unix)]
     fn fsync_dir(&mut self, _renamed: Renamed, dir: &Path) -> Result<()> {
         // On Apple targets std's sync_all is fcntl(F_FULLFSYNC) with no
         // fallback; it was measured succeeding on a directory fd on APFS.
@@ -128,6 +129,90 @@ impl Medium for Disk {
             .map_err(io("fsync_dir open"))?
             .sync_all()
             .map_err(io("fsync_dir"))
+    }
+
+    /// **The fourth step performs no I/O on Windows, and I3's power-loss
+    /// clause is not claimed there.**
+    ///
+    /// The Unix step cannot simply be compiled here. `File::open` on a
+    /// directory is `CreateFileW` without `FILE_FLAG_BACKUP_SEMANTICS`, which
+    /// Windows refuses, so that body fails every commit at its last step --
+    /// after the rename, on a handle that is then poisoned for a commit that
+    /// landed. Read in `std`'s Windows `fs` source, not run.
+    ///
+    /// Nor is there a substitute to put in its place. What the Unix step buys
+    /// is that the directory entry the rename wrote reaches the device before
+    /// [`crate::keystore::Durable`] is minted, so a power cut after the
+    /// receipt cannot bring back the previous snapshot. Win32 documents no
+    /// call that establishes that for a same-volume rename on NTFS:
+    /// `MOVEFILE_WRITE_THROUGH` is documented for a move performed as a copy
+    /// and a delete, and a directory handle opened for backup semantics and
+    /// flushed is behaviour no document states. Two candidates were weighed
+    /// and refused:
+    ///
+    /// * **Flush a directory handle opened with backup semantics.** It may
+    ///   commit the entry and may be refused; neither is documented, and a
+    ///   refusal here fails a commit whose rename already landed.
+    /// * **Reopen the snapshot under its new name and flush it.** That
+    ///   flushes the file, which the second step already did under the old
+    ///   name. Whether flushing a file also commits the journal record of the
+    ///   rename that named it is an NTFS implementation property this tree
+    ///   has not measured, and the reopen is a fresh chance for the sharing
+    ///   refusal `ReplaceRefused` names -- again after the rename.
+    ///
+    /// Either would make the claim sound stronger than anything measured,
+    /// which is the one thing this step must not do.
+    ///
+    /// # What that leaves, stated as a hazard and not as a footnote
+    ///
+    /// Every kill at a syscall boundary is still covered: the rename is
+    /// visible to every other process when it returns, and the proofs driven
+    /// through [`Instrumented`] are about exactly that. That rests on the
+    /// replacing move being atomic, which NTFS provides and Win32 does not
+    /// document -- the same reliance the keystore states for ext4 and APFS,
+    /// on one more filesystem. What is not covered is
+    /// **power loss or an operating-system crash between a commit and the
+    /// filesystem's own flush of its log**. After one, the previous snapshot
+    /// can come back. If that commit reserved a key and the spend it signed
+    /// has not yet settled, the store no longer records the reservation, and
+    /// the next spend can reserve and sign the same position again -- the
+    /// key reuse this wallet exists to refuse. Reconciliation catches it only
+    /// once the first spend has reached the chain.
+    ///
+    /// What would change this answer is a measurement, not an argument: a
+    /// power-cut test on NTFS under each candidate above.
+    #[cfg(windows)]
+    fn fsync_dir(&mut self, _renamed: Renamed, _dir: &Path) -> Result<()> {
+        Ok(())
+    }
+}
+
+/// The rename's failure, named when Windows reports a held file.
+///
+/// On Unix every failure is the anonymous `Io` it always was: `rename(2)`
+/// is not refused because another process has either file open.
+#[cfg(unix)]
+fn rename_refusal(e: std::io::Error) -> Error {
+    io("rename")(e)
+}
+
+/// The rename's failure, named when Windows reports a held file.
+///
+/// `std`'s Windows `rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`,
+/// retried once through `FileRenameInfoEx` with POSIX semantics when the first
+/// attempt is `ERROR_ACCESS_DENIED`; if the retry also fails, the FIRST error
+/// is what comes back. So the codes arriving here are `MoveFileExW`'s, and
+/// the two a held source or target produces are the two matched below.
+/// `ERROR_SHARING_VIOLATION` has no `ErrorKind` in `std` and would reach the
+/// operator as `Uncategorized`, which is the other reason it needs a name.
+#[cfg(windows)]
+fn rename_refusal(e: std::io::Error) -> Error {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
+    match e.raw_os_error() {
+        Some(code) if code == ERROR_ACCESS_DENIED as i32 || code == ERROR_SHARING_VIOLATION as i32 => {
+            Error::ReplaceRefused { code }
+        }
+        _ => io("rename")(e),
     }
 }
 

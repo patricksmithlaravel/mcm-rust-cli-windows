@@ -129,6 +129,29 @@ pub enum Error {
     UnsafePermissions {
         mode: u32,
     },
+    /// Windows refused to move the new snapshot over the old one, with the
+    /// system error `code` -- `ERROR_ACCESS_DENIED` or
+    /// `ERROR_SHARING_VIOLATION`, the two a held file produces.
+    ///
+    /// **Named because it is the one commit failure an operator can do
+    /// something about.** A replacing move fails on Windows while another
+    /// process holds the snapshot or its replacement open without delete
+    /// sharing, and the processes that do that are ordinary residents of a
+    /// desktop: an antivirus scanner, a search indexer, a backup or sync
+    /// agent. Reported as `Io { op: "rename", .. }` it reads as a damaged
+    /// disk. The refused move changes nothing -- the previous snapshot is
+    /// intact and nothing was committed -- so this is availability and not
+    /// correctness, and the handle is poisoned as after any commit failure.
+    ///
+    /// The two codes are not proof of a holder: `ERROR_ACCESS_DENIED` is
+    /// also what a genuine access refusal returns, which is why the message
+    /// says *usual cause* and not *cause*. Every other code stays `Io`.
+    /// Windows-only, because on the platforms `rename(2)` serves, an open
+    /// descriptor never blocks a rename.
+    #[cfg(windows)]
+    ReplaceRefused {
+        code: i32,
+    },
     /// A key is reserved for an unsettled spend; no further advance until
     /// `persist_settled`.
     PendingUnresolved {
@@ -506,6 +529,16 @@ impl fmt::Display for Error {
                 f,
                 "keystore directory mode {mode:o} is group- or other-writable; refusing to \
                  hold key material there"
+            ),
+            #[cfg(windows)]
+            Error::ReplaceRefused { code } => write!(
+                f,
+                "keystore rename: Windows refused to replace accounts.mks (system error {code}). \
+                 The usual cause is another program holding the snapshot or its replacement open \
+                 without delete sharing -- an antivirus scanner, a search indexer, a backup or \
+                 sync agent. The previous snapshot is intact and nothing was committed; run the \
+                 command again, and if the refusal persists, exclude the keystore directory from \
+                 that program"
             ),
             Error::PendingUnresolved { spent_index } => write!(
                 f,

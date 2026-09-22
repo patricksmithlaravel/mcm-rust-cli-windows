@@ -32,10 +32,12 @@
 all-features = true
 
 # `targets` is deliberately left unset, so every target triplet is considered.
-# The lockfile carries the `windows-sys` family and `wasi`, which no build on
-# the two platforms RELEASE.md names will ever compile. Narrowing to those two
-# would drop them from the walk, and a licence question is about what this
-# lockfile can pull in, not about what one host happened to build.
+# The lockfile carries `wasi`, which no build on the platforms RELEASE.md names
+# will ever compile, and the `windows-sys` family, which the Windows builds do:
+# `crates/mochimo-crypto/Cargo.toml` takes 0.61.2 directly, and its entry
+# there says for what. Narrowing to the named platforms would drop `wasi` from
+# the walk, and a licence question is about what this lockfile can pull in,
+# not about what one host happened to build.
 
 # `crates/mochimo-crypto/ui/downstream` is NOT covered here. It is its own
 # workspace, by the design its manifest states, and its lockfile is copied in
@@ -120,12 +122,19 @@ ignore = true
 [bans]
 # DUPLICATE VERSIONS ARE ALLOWED, and this is a measurement rather than a
 # shrug. The duplicates in this graph -- `syn` 2 and 3, `toml` 0.8 and 1.1,
-# `winnow` 0.7 and 1.0, `serde_spanned`, `toml_datetime`, `windows-sys` 0.52
-# and 0.61 -- are every one of them on the dev-dependency side, under
-# `trybuild` and `toml`. None is in a wallet build: `cargo build` and any
-# dependent see none of them. Denying duplicates outright would make this gate
-# red for a condition the manifest already accepts in writing, and a gate that
-# is expected to be red is a gate nobody reads.
+# `winnow` 0.7 and 1.0, `serde_spanned`, `toml_datetime` -- are every one of
+# them on the dev-dependency side, under `trybuild` and `toml`. None is in a
+# wallet build: `cargo build` and any dependent see none of them. Denying
+# duplicates outright would make this gate red for a condition the manifest
+# already accepts in writing, and a gate that is expected to be red is a gate
+# nobody reads.
+#
+# `windows-sys` 0.52 and 0.61 are the exception, and it is one target wide.
+# 0.52 is `ring`'s, under `mesh-https`, on aarch64 Windows only; 0.61 is this
+# crate's own on every Windows target. So an aarch64 Windows binary links
+# both. Two copies of a set of extern declarations is a size cost and not a
+# correctness one -- there is no shared trait between them to disagree about,
+# which is what makes the `digest` duplicate below the one that matters.
 #
 # The duplicate that would actually matter is denied by name below.
 multiple-versions = "allow"
