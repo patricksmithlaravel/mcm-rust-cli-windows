@@ -1,1 +1,14 @@
+# Every text file is checked out with LF line endings, on every platform.
+#
+# Git for Windows installs with `core.autocrlf=true`, which rewrites text files
+# to CRLF on checkout. This tree cannot take that: the invariant suite scans
+# the source byte for byte, the JSON fixtures are "never edited" and replayed
+# as recorded, and trybuild compares compiler output against checked-in
+# `.stderr` files. A CRLF checkout changes the bytes every one of those reads,
+# and the board would go red on Windows for a reason that is not in any
+# commit. `text=auto` leaves binary files -- the `.bin` fixtures -- alone.
+* text=auto eol=lf
+
+# Vendored standards texts whose bytes are pinned by hash: never converted at
+# all, in either direction.
 docs/standards/*.txt -text

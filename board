@@ -11,11 +11,23 @@
 # installed here, and a recipe file nobody on this machine can run is worse
 # than no recipe file. `make` is installed, but it is GNU make 3.81 on this
 # host -- 2006, the last GPLv2 release Apple ships -- against 4.x on every
-# current Linux, and RELEASE.md requires this be run on both platforms. A
-# build tool whose two versions are nineteen years apart is a second variable
-# inside the thing meant to remove variables. A POSIX shell script has no
-# version skew between the two, no tab-versus-space rule, and nothing to
+# current Linux, and RELEASE.md requires this be run on every platform it
+# names. A build tool whose two versions are nineteen years apart is a second
+# variable inside the thing meant to remove variables. A POSIX shell script has
+# no version skew between the two, no tab-versus-space rule, and nothing to
 # install before the board can be run at all.
+#
+# ON WINDOWS, THE SAME SCRIPT, under the POSIX shell Git for Windows installs
+# (Git Bash): `./board check` from that shell, at the repository root. Nothing
+# in it is Unix-specific beyond `sh`, `date` and `uname`, all of which that
+# shell supplies. A PowerShell twin was the alternative and is refused: this
+# script is already a transcription of AGENT.md's block that nothing holds to
+# the original, and a second transcription is a third copy with the same
+# defect twice. What a Windows host needs besides Git is Rust through rustup,
+# the MSVC build tools, and -- for the `build: shipped` row and the TLS clippy
+# row, which compile `ring`'s C -- what `ring`'s own build documentation asks
+# for on that target, which on aarch64 Windows is clang. That last part is
+# read from `ring`'s documentation and has not been run.
 #
 # WHERE THE ROWS CAME FROM. Every command below is transcribed from AGENT.md's
 # "Build and test" block, which is where the board is defined. THE TWO COPIES
@@ -157,6 +169,9 @@ summarise() {
         printf '=== %s: %s row(s) FAILED:%s\n' "$what" "$failures" "$failed_rows"
     fi
     printf '=== total %ss\n' "$(( $(date +%s) - run_start ))"
+    # The platform, because RELEASE.md's record is about which platform a run
+    # happened on, and a transcript that does not say is a record of nothing.
+    printf '=== host %s\n' "$(uname -srm 2>/dev/null || echo 'unknown: uname failed')"
     printf '========================================================\n'
     [ "$failures" -eq 0 ]
 }
@@ -182,7 +197,7 @@ case "${1:-}" in
         printf '  check   the eight board commands from AGENT.md. Minutes.\n' >&2
         printf '          Run before a commit.\n' >&2
         printf '  verify  check, then `cargo deny check`, then Miri. Hours.\n' >&2
-        printf '          Run before a tag, on Linux and on macOS. See RELEASE.md.\n' >&2
+        printf '          Run before a tag, on Linux, macOS and Windows. See RELEASE.md.\n' >&2
         exit 2
         ;;
 esac

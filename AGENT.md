@@ -43,7 +43,9 @@ failed and exits non-zero if one did; `./board verify` is that plus `cargo
 deny check` and the Miri run, and is what `RELEASE.md` asks for before a tag.
 The script transcribes this block and **nothing holds the two copies to each
 other** -- a row edited here and not there leaves the script running the old
-board and printing green for it.
+board and printing green for it. On Windows it runs unchanged under the POSIX
+shell Git for Windows installs; `board`'s head says what else that host needs
+and why there is no PowerShell copy.
 
 `cargo fmt` is not a gate; do not reformat unrelated code.
 
@@ -245,13 +247,17 @@ these numbers forward. The figure to compare across runs is the per-target
 one: lib 44, cli 111, compile_fail 1,
 derive 10, invariants 68, kat 18, keystore 33, mesh 13, mesh_http 10, miri 2,
 net 3, recon 29, signing 17, spend 19, txwire 3, wots_internals 4,
-doc-tests 0.
+doc-tests 0. Those are a macOS run's figures; on Windows `cli` runs eighteen
+fewer and `keystore` swaps three mode-bit tests for three access-list tests,
+which `RELEASE.md` records beside the gate that asks for these figures.
 
 Three things about running it. The `cli` target's eighteen `pty::` tests build
 the shipped binary with `--features mesh-https` and drive it under BSD
 `script(1)`; they need `cargo` on the path and a host whose `script` accepts
 `-q /dev/null cmd args`, and the count is whatever `cargo test -q -p
-mochimo-crypto --test cli -- --list | grep -c 'pty::'` prints. The
+mochimo-crypto --test cli -- --list | grep -c 'pty::'` prints. On Windows the
+module is compiled out -- the harness has no Windows counterpart -- and
+`RELEASE.md` says what that leaves unreached. The
 `invariants` target's census spawns `cargo test --workspace --no-run` and the
 sibling binaries, so it has to be run *by* `cargo test` and never by invoking
 the test binary directly. And `kat.rs` replays all 5,364 vectors twice, 111 s

@@ -4015,7 +4015,7 @@ fn the_listing_needs_no_node_and_no_seed() {
 // destination both in-process and through `create --from-phrase`. It cannot
 // see a terminal emulator's scrollback policy, a `SIGKILL` inside the
 // echo-off window, or util-linux `script`'s behaviour.
-#[cfg(not(miri))]
+#[cfg(all(unix, not(miri)))]
 mod pty {
     use std::io::{Read, Write};
     use std::path::{Path, PathBuf};

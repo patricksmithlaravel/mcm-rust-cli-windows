@@ -601,6 +601,13 @@ fn crate_source_files() -> Vec<(String, String)> {
         if !src.is_dir() {
             continue;
         }
+        // Every walk in this file names a file by its path from the root
+        // with `/` between the parts, on every platform, because that is how
+        // the names it is compared against are written -- forty-odd string
+        // literals of the form `crates/mochimo-crypto/src/...`. On Windows
+        // `to_string_lossy` of a relative path joins with `\`, and every
+        // one of those comparisons would fail for a reason unrelated to what
+        // it checks. On Unix the replacement changes nothing in this tree.
         let mut stack = vec![src];
         while let Some(d) = stack.pop() {
             let entries = std::fs::read_dir(&d)
@@ -616,7 +623,7 @@ fn crate_source_files() -> Vec<(String, String)> {
                         .strip_prefix(&root)
                         .unwrap_or(&p)
                         .to_string_lossy()
-                        .into_owned();
+                        .replace('\\', "/");
                     out.push((name, text));
                 }
             }
@@ -6127,7 +6134,7 @@ fn all_crate_rust_sources_raw() -> Vec<(String, String)> {
                     .strip_prefix(&root)
                     .unwrap_or(&p)
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 out.push((name, text));
             }
         }
@@ -10353,7 +10360,7 @@ fn test_source_files() -> Vec<(String, String)> {
                     .strip_prefix(&root)
                     .unwrap_or(&p)
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 out.push((name, text));
             }
         }
@@ -10497,7 +10504,7 @@ fn code_only_understands_every_construct_its_inputs_contain() {
                     stack.push(p);
                 }
             } else if p.extension().is_some_and(|x| x == "rs") {
-                let rel = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().into_owned();
+                let rel = p.strip_prefix(&root).unwrap_or(&p).to_string_lossy().replace('\\', "/");
                 inputs.push((rel, std::fs::read_to_string(&p).unwrap_or_default()));
                 crate_src += 1;
             }
@@ -11673,7 +11680,7 @@ fn ui_and_example_source_files() -> Vec<(String, String)> {
                     .strip_prefix(&root)
                     .unwrap_or(&p)
                     .to_string_lossy()
-                    .into_owned();
+                    .replace('\\', "/");
                 out.push((name, text));
             }
         }

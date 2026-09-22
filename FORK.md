@@ -219,6 +219,11 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | `README.md`, `docs/specification.md` | the platform statements, and the Windows limits an operator must know -- no power-loss flush, a rename another program can refuse | they describe a Windows build Rep-0 does not have |
 | `tests/invariants.rs` | two rows in `unsafe_is_confined_to_declared_files` -- the permission model and the binary's console -- and `from_raw_os_error` in the declared unresolved names | neither the Win32 security API nor the console mode has a `std` wrapper, so both are foreign calls or nothing |
 | `tests/invariants.rs` | `the_unix_surface_is_confined_to_the_files_a_port_would_touch` lists the files the port touched, per needle, where upstream lists the four a port would | it is the record of the port; the test keeps its upstream name so that upstream edits to it still merge |
+| `tests/invariants.rs` | its five source walks name files with `/` on every platform | on Windows a relative path joins with `\`, and forty-odd name literals would stop matching |
+| `tests/keystore.rs` | the three mode-bit tests are `cfg(unix)`; three `cfg(windows)` tests measure the access-list refusal, the protected creation and the named rename refusal | mode bits do not exist on Windows, and the Windows claims need a test that runs there |
+| `tests/cli.rs` | one attribute: the `pty` module is `cfg(all(unix, not(miri)))` | its harness is `script(1)`; no assertion changes, which is what the rule about this file protects |
+| `.gitattributes` | every text file checked out with LF | Git for Windows checks out CRLF by default, and the source scans, the JSON fixtures and the trybuild expectations are read byte for byte |
+| `AGENT.md` | the board runs under Git Bash on Windows; the `pty::` count and the board figures are per platform | the board is defined there, and its platform list is what widened |
 
 #### What Rep-1 may not change
 
@@ -267,11 +272,48 @@ does not read this, and nothing else does either. A table above that stops
 matching the tree turns nothing red, and the check named beside it is what
 would.
 
-## Fork point 1 -- Rep-0 to Rep-1
+## Fork point 1 -- Rep-0 to Rep-1 **(cut, 2026-09-22)**
 
 **The delta to expect after Phase 0: two `cfg` arms and a durability
 statement.** If it is larger than that, P0-1 did not do its job and the
 difference should be understood before the fork is cut rather than after.
+
+`phase-0` fast-forwarded into Rep-0's `main`, so `fork-point-1` still names
+the same commit, and `./board check` on that tree was green: 393 passed, 0
+failed, 0 ignored, over seventeen result lines. Rep-1 is a clone of Rep-0 at
+that tag with Rep-0 as its only remote, named `rep-0`, whose push URL is
+disabled: Rep-0 never merges from anywhere, so nothing should be able to push
+to it from here.
+
+### The delta, measured
+
+`git diff fork-point-1..HEAD --stat -- crates/` at the end of Phase 1: eleven
+files, 1,405 lines added and 100 removed. **It touches neither the command
+layer nor `recon`**, which is the policy's own test of whether it held.
+
+The expectation above was low, and the difference is understood rather than
+waved at. Three things made it larger, none of which P0-1 could have taken
+upstream:
+
+* **The permission arm is foreign calls.** `std` neither reads a security
+  descriptor nor creates a file under one, so the access-list check and the
+  owner-only creation are 288 lines of code over `windows-sys`, in a file of
+  their own -- and the first `unsafe` under `src/` since the C backend left.
+* **The console could not be a `File` over the console's handle.** `ReadFile`
+  on a console returns the input code page's bytes, which would make a
+  password different bytes on Windows than on Linux. The wide calls are
+  foreign too, and they are most of the binary's 180 added lines of code.
+* **The test tree assumed Unix in three places**: the mode-bit tests, the
+  pseudo-terminal harness, and path separators in the invariant suite's walks.
+
+What matters for merge cost is how much *upstream* code moved, and that is
+small: 25 lines of Unix-compiled code were removed or replaced -- ten prompt
+messages now naming their device through one constant, the two gates and
+their messages, the rename's error mapping, and one field type. Everything
+else is additive: `cfg(windows)` arms, one new file, three new tests, and
+prose. By a count of added lines in `crates/`, more than half of what Phase 1
+wrote is argument rather than code, which is this tree's standard and not an
+accident of it.
 
 ## Phase 1 -- work in Rep-1
 
@@ -292,15 +334,63 @@ and it type-checks; it runs nothing, links nothing, and says nothing about
 behaviour. Three of the items below are behavioural and the check is blind to
 every one of them.
 
-### R1-1 -- the gates
+**Re-measured at the fork, 2026-09-22: seven errors, not eight.** The two
+gates, and five in `keystore/perms.rs` -- one import and four `mode` calls --
+because P0-1 folded three imports into one. At the end of Phase 1, with the
+gates gone and nothing neutralised, `cargo check --workspace --all-targets
+--target x86_64-pc-windows-msvc` reports no errors and no warnings, and
+`cargo clippy --workspace --all-targets -- -D warnings` and `cargo doc` for
+that target are clean too. The shipped binary was checked against
+`mesh-http` in a scratch copy with `required-features` dropped, because
+`ring` cannot cross-compile; a type error planted in a `cfg(windows)` item
+fails that command, which is the evidence the arm was compiled and not
+skipped. All of it is still a check.
+
+### Two corrections to the platform statement Rep-0 makes
+
+**`flock` was never an obstacle**, though the keystore's gate named it as one.
+`std`'s `File::try_lock` is `LockFileEx` on Windows -- read in `std`'s Windows
+`fs` source: `LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY` over the
+whole range, with `ERROR_LOCK_VIOLATION` mapped to `WouldBlock` -- and the
+property the root manifest rests the lock design on survives: the system
+releases a terminated process's locks, so a held lock means a live holder. One
+residue is Microsoft's own: the release follows termination after a time that
+depends on available system resources, so a lock can briefly outlive its
+holder. That is a refusal, `Locked`, and so the fail-closed direction.
+
+**The three-interface list omits the durability primitives**, and they are
+where the work was. `lib.rs`'s gate named the permission model, the terminal
+and the generator; the rename and the directory flush it did not name, and
+R1-3 and R1-4 are both about them. The platform statement now has the three
+interfaces in `lib.rs` and the storage primitives, per platform, in
+`keystore`, and says so in each.
+
+### R1-1 -- the gates **(done, 2026-09-22)**
 
 Replace both `compile_error!`s with a per-platform statement. The Unix half of
 what they say stays true and stays said.
 
-### R1-2 -- the Windows permission model
+Done last among the code items, because the gate was the only thing keeping
+R1-3's failure unreachable. `lib.rs`'s head carries the statement as a table
+with a Unix column and a Windows column and says the two are not established
+to the same degree; each gate is now `cfg(not(any(unix, windows)))`. The
+keystore's lock section records the correction about `flock` above, with the
+one residue Microsoft documents: a lock can briefly outlive a terminated
+holder, which is met as `Locked`.
+
+### R1-2 -- the Windows permission model **(done, 2026-09-22; not run)**
 
 A second arm in `keystore::perms`: a DACL check where the mode check is, and
 restricted creation where the mode-carrying creation is.
+
+In `keystore/perms/windows.rs`. Creation hands a protected, owner-only
+descriptor to `CreateFileW` and `CreateDirectoryW`; the check refuses a
+directory anyone but the user, `SYSTEM` or Administrators can write to, and
+one another user owns. The refusal is a new `cfg(windows)` variant,
+`Error::UnsafeAcl`, rather than `UnsafePermissions` carrying an invented mode.
+**This plan did not foresee that the arm is `unsafe`**, which
+`unsafe_is_confined_to_declared_files` refused until it was given a row with
+the argument its comment asks for.
 
 `windows-sys` is **already in `Cargo.lock`** (two versions, through the
 transport's graph), and `deny.toml` leaves `targets` unset deliberately so the
@@ -311,7 +401,7 @@ Note what `perms.rs` records about the public surface: `Error::UnsafePermissions
 carries `mode: u32` and renders it as octal. A second implementation either
 reports a Unix mode it did not measure or changes a public variant.
 
-### R1-3 -- `fsync_dir`, which is the one that matters
+### R1-3 -- `fsync_dir`, which is the one that matters **(done, 2026-09-22; not run)**
 
 `medium.rs`'s fourth durable step opens the directory and `sync_all`s it. On
 Windows that **compiles and fails at runtime**: `File::open` on a directory is
@@ -323,7 +413,13 @@ There is no directory `fsync` on NTFS to substitute. **I3's crash proof does
 not transfer**, and the honest form is a per-platform durability claim that
 says so, in the idiom the rest of this tree uses for what it cannot establish.
 
-### R1-4 -- rename under a sharing violation
+The Windows step performs no I/O. Two candidate substitutes are weighed and
+refused at the site, and the hazard is written as one: a power cut before
+NTFS flushes its log can bring back the previous snapshot, and with it the
+chance to sign a reserved position twice. The README tells a Windows operator
+what to do after a power cut.
+
+### R1-4 -- rename under a sharing violation **(done, 2026-09-22; not run)**
 
 `fs::rename` over an existing file maps to a replacing move on Windows, which
 fails while another process holds the target open without delete sharing --
@@ -331,14 +427,27 @@ scanners, indexers, backup agents. The commit fails cleanly and the store is
 unchanged, so this is an availability problem and not a correctness one, but it
 needs a named error rather than an anonymous `Io`.
 
-### R1-5 -- the binary
+`Error::ReplaceRefused { code }`, for `ERROR_ACCESS_DENIED` and
+`ERROR_SHARING_VIOLATION`. One thing learned in `std`'s source: its Windows
+`rename` retries a refused move with POSIX rename semantics, and returns the
+first error if the retry fails too. Whether that retry replaces a held file is
+not established; the `cfg(windows)` test that holds the snapshot open says in
+its own doc what a red result there would mean.
+
+### R1-5 -- the binary **(done, 2026-09-22; not run)**
 
 `/dev/tty`, `stty` and `/dev/urandom` are the binary's, not the library's --
 the library takes entropy as a parameter and `cli::create::Terminal` is already
 the seam for the prompts. The Windows equivalents are the console device, the
 console mode flags, and the platform generator.
 
-### R1-6 -- the board
+`CONIN$` and `CONOUT$` by name, `ENABLE_ECHO_INPUT`, and `BCryptGenRandom`.
+The `Terminal` impl is not copied: `Tty` holds a `Device`, which is a `File` on
+Unix and a `Console` implementing `Read` and `Write` on Windows, so the prompt
+ordering this binary's defects taught is written once and an upstream fix to
+it reaches both platforms.
+
+### R1-6 -- the board **(done, 2026-09-22; not run on Windows)**
 
 `./board` is a POSIX shell script. `RELEASE.md` asks for green on two platforms
 at one commit; it becomes three.
@@ -347,6 +456,24 @@ at one commit; it becomes three.
 pseudo-terminal harness drives the binary through `script(1)` and has no
 Windows equivalent, so the binary's remainder -- argv, the prompts, the real
 transport -- is exercised on two platforms and not on the third.
+
+The script runs unchanged under Git for Windows' POSIX shell, and its head
+says why there is no PowerShell copy. `RELEASE.md` asks for three green rows
+at one commit and records the gap above, and what a green Windows board does
+and does not say. For the board to be green on Windows at all, the test tree
+had to compile there and its checkouts had to be byte-identical: the mode-bit
+tests and the `pty` module are `cfg(unix)`, the invariant suite's walks name
+files with `/`, and `.gitattributes` asks for LF. `cargo check --all-targets`
+for the Windows target is clean. **No board has run on Windows**; that is the
+next thing to do, and it needs a Windows host or a CI runner.
+
+### R1-7 -- the surface check **(done, 2026-09-22)**
+
+`the_unix_surface_is_confined_to_the_files_a_port_would_touch` keeps its name
+and lists the files the port touched, one needle per kind of site, including
+`cfg(unix)` and `cfg(windows)` -- the only way `medium.rs`, whose sites compile
+everywhere and behave differently, becomes enumerable at all. A `cfg(windows)`
+planted in `cli/address.rs` fails it and the failure names the file.
 
 ---
 

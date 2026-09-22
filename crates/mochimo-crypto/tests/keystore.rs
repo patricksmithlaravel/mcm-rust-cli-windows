@@ -15,6 +15,7 @@
 #[path = "support/keystore_harness.rs"]
 mod keystore_harness;
 
+#[cfg(unix)]
 use std::os::unix::fs::PermissionsExt;
 
 use keystore_harness::{
@@ -718,10 +719,27 @@ fn open_refuses_a_missing_snapshot_and_create_refuses_an_existing_store() {
 trait Mode0700 {
     fn mode_0700(&mut self) -> &mut Self;
 }
+#[cfg(unix)]
 impl Mode0700 for std::fs::DirBuilder {
     fn mode_0700(&mut self) -> &mut Self {
         use std::os::unix::fs::DirBuilderExt;
         self.mode(0o700)
+    }
+}
+/// Nothing, on Windows: `DirBuilder` takes no security descriptor there, so
+/// the directory inherits its parent's access list. Under a checkout in the
+/// user's profile that list grants only the user, `SYSTEM` and Administrators,
+/// which the Windows arm accepts. Under a checkout whose ancestors let other
+/// users write -- a folder directly under `C:\` inherits `Authenticated
+/// Users` with modify rights -- the three tests that make their own directory
+/// through this are refused as `UnsafeAcl`, which is the check working and
+/// not the test. Every other scratch store here is made by the keystore
+/// itself, under its own protected list, and does not depend on where the
+/// checkout is.
+#[cfg(windows)]
+impl Mode0700 for std::fs::DirBuilder {
+    fn mode_0700(&mut self) -> &mut Self {
+        self
     }
 }
 
@@ -1046,6 +1064,7 @@ fn stale_temp_is_unlinked_and_never_adopted() {
     assert_eq!(read_snapshot(&dir), target);
 }
 
+#[cfg(unix)]
 #[test]
 fn temp_file_is_created_mode_0600_and_the_directory_0700() {
     let dir = ScratchDir::new("modes");
@@ -1059,6 +1078,7 @@ fn temp_file_is_created_mode_0600_and_the_directory_0700() {
     assert_eq!(tmode, 0o600, "the temp holds plaintext roots and must not be group/other readable");
 }
 
+#[cfg(unix)]
 #[test]
 fn open_refuses_a_group_writable_directory() {
     let dir = ScratchDir::new("perms");
@@ -1068,6 +1088,114 @@ fn open_refuses_a_group_writable_directory() {
     assert_eq!(Keystore::open(dir.path(), &keystore_harness::unlock()).err(), Some(Error::UnsafePermissions { mode: 0o775 }));
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap_or_else(|e| panic!("{e}"));
     assert!(Keystore::open(dir.path(), &keystore_harness::unlock()).is_ok());
+}
+
+/// `icacls` on `path`, with the arguments given, which must succeed.
+///
+/// Trustees are named by SID with `icacls`'s `*` prefix, so the command reads
+/// the same in every Windows language; its output is localized and is never
+/// parsed here. Whether a list says what these tests need is asked of the
+/// keystore's own check instead, which is the thing under test.
+#[cfg(windows)]
+fn icacls(path: &std::path::Path, args: &[&str]) {
+    let status = std::process::Command::new("icacls")
+        .arg(path)
+        .args(args)
+        .stdout(std::process::Stdio::null())
+        .status()
+        .unwrap_or_else(|e| panic!("cannot run icacls: {e}"));
+    assert!(status.success(), "icacls {} {args:?} failed: {status}", path.display());
+}
+
+/// The Windows form of `open_refuses_a_group_writable_directory`: a store
+/// directory Everyone may modify is refused, by name, and naming Everyone;
+/// the same directory with that entry removed opens.
+///
+/// **This has not run.** It compiles for `x86_64-pc-windows-msvc`, and the
+/// first board on a Windows host is the first measurement of the refusal.
+#[cfg(windows)]
+#[test]
+fn open_refuses_a_directory_everyone_can_write_to() {
+    let dir = ScratchDir::new("acl-everyone");
+    drop(Keystore::create(dir.path(), &keystore_harness::init()).unwrap_or_else(|e| panic!("{e}")));
+    icacls(dir.path(), &["/grant", "*S-1-1-0:(M)"]);
+    match Keystore::open(dir.path(), &keystore_harness::unlock()).err() {
+        Some(Error::UnsafeAcl { trustee, .. }) => assert_eq!(trustee, "S-1-1-0", "the refusal names the wrong trustee"),
+        other => panic!("a directory Everyone may modify was not refused as UnsafeAcl: {other:?}"),
+    }
+    icacls(dir.path(), &["/remove:g", "*S-1-1-0"]);
+    assert!(Keystore::open(dir.path(), &keystore_harness::unlock()).is_ok(), "the directory does not open once the grant is gone");
+}
+
+/// A store created inside a directory Everyone may modify inherits none of
+/// it: the keystore's protected list is what the directory gets, and the
+/// keystore's own check is what reads it back.
+///
+/// The parent is granted Everyone with inheritance to files and directories,
+/// and the premise is asserted -- the parent itself is refused. If the store
+/// directory were created without the protected flag it would inherit that
+/// grant and `create` would refuse it; that it opens is the evidence the flag
+/// is set. **This has not run**, as above.
+#[cfg(windows)]
+#[test]
+fn a_store_created_under_a_writable_parent_inherits_nothing_from_it() {
+    let parent = ScratchDir::new("acl-parent");
+    std::fs::create_dir(parent.path()).unwrap_or_else(|e| panic!("{e}"));
+    icacls(parent.path(), &["/grant", "*S-1-1-0:(OI)(CI)(M)"]);
+    assert!(
+        matches!(Keystore::open(parent.path(), &keystore_harness::unlock()).err(), Some(Error::UnsafeAcl { .. })),
+        "premise: the parent Everyone may modify is itself refused"
+    );
+    let store = parent.path().join("store");
+    let mut ks = Keystore::create(&store, &keystore_harness::init())
+        .unwrap_or_else(|e| panic!("the store created under a writable parent is refused, so it inherited: {e}"));
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    drop(ks);
+    assert!(Keystore::open(&store, &keystore_harness::unlock()).is_ok(), "the store does not reopen");
+}
+
+/// A snapshot another process holds open without delete sharing refuses the
+/// commit **by name**, changes nothing on disk, and poisons the handle; the
+/// store reopens at the index it had.
+///
+/// The holder shares read only, which is the shape of a scanner or an
+/// indexer that did not ask for delete sharing. **This has not run**, and it
+/// can be red for an informative reason: `std` retries a refused replacing
+/// move once with POSIX rename semantics. If that retry replaces a held file
+/// on the Windows it runs on, the commit succeeds, this test says so, and
+/// `ReplaceRefused` is reachable there only through a holder of the temp.
+#[cfg(windows)]
+#[test]
+fn a_snapshot_held_open_without_delete_sharing_refuses_the_commit_by_name() {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
+    let dir = ScratchDir::new("held-snapshot");
+    let mut ks = keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    let before = read_snapshot(&dir);
+    let holder = std::fs::OpenOptions::new()
+        .read(true)
+        .share_mode(FILE_SHARE_READ)
+        .open(dir.path().join("accounts.mks"))
+        .unwrap_or_else(|e| panic!("cannot hold the snapshot open: {e}"));
+    let refused = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err();
+    drop(holder);
+    assert!(
+        matches!(refused, Some(Error::ReplaceRefused { .. })),
+        "a commit over a held snapshot was not refused as ReplaceRefused: {refused:?}"
+    );
+    assert_eq!(read_snapshot(&dir), before, "the refused move changed the snapshot");
+    assert!(
+        matches!(ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err(), Some(Error::Poisoned { .. })),
+        "the handle was not poisoned by the refused commit"
+    );
+    drop(ks);
+    let reopened = keystore_harness::open(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        reopened.view(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("missing")).wots_index,
+        WotsIndex::ZERO,
+        "the store reopened at a different index after a refused commit"
+    );
 }
 
 #[test]
@@ -1742,6 +1870,7 @@ fn kdf_refusals_name_the_parameter_they_are_about() {
 /// one place every write goes through, so neither caller can forget. Read
 /// back from disk, never assumed: the mode this asserts is the one `stat`
 /// reports after the commit.
+#[cfg(unix)]
 #[test]
 fn a_stale_temp_with_loose_permissions_does_not_reach_the_snapshot() {
     let dir = ScratchDir::new("stale-temp-mode");
