@@ -216,7 +216,9 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | `keystore/perms/windows.rs` | the Windows permission model, a new file | it is the Windows arm; a separate file so `perms.rs` stays the Unix arm and upstream edits to it merge without meeting Windows code |
 | `error.rs` | `UnsafeAcl` and `ReplaceRefused`, both `cfg(windows)` | the evidence a Windows refusal carries has no Unix shape, and `UnsafePermissions`' `mode` would have to be invented to carry it |
 | `crates/mochimo-crypto/Cargo.toml` | `windows-sys`, a `cfg(windows)` dependency | the declarations the two Windows arms call |
+| `README.md`, `docs/specification.md` | the platform statements, and the Windows limits an operator must know -- no power-loss flush, a rename another program can refuse | they describe a Windows build Rep-0 does not have |
 | `tests/invariants.rs` | two rows in `unsafe_is_confined_to_declared_files` -- the permission model and the binary's console -- and `from_raw_os_error` in the declared unresolved names | neither the Win32 security API nor the console mode has a `std` wrapper, so both are foreign calls or nothing |
+| `tests/invariants.rs` | `the_unix_surface_is_confined_to_the_files_a_port_would_touch` lists the files the port touched, per needle, where upstream lists the four a port would | it is the record of the port; the test keeps its upstream name so that upstream edits to it still merge |
 
 #### What Rep-1 may not change
 

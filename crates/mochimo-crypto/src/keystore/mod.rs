@@ -49,9 +49,10 @@
 //! # The lock
 //!
 //! `keystore.lock` is created once, never unlinked, and held with
-//! `File::try_lock` (`flock(2)`) for the handle's life; `Drop` does nothing,
-//! because the kernel releases the lock on process death — including
-//! `SIGKILL` — so a held lock always means a live holder. A `create_new`
+//! `File::try_lock` (`flock(2)`; `LockFileEx` on Windows) for the handle's
+//! life; `Drop` does nothing, because the kernel releases the lock on process
+//! death — including `SIGKILL` — so a held lock always means a live holder
+//! (on Windows, a live or a just-terminated one; see below). A `create_new`
 //! lockfile instead is the stale-lock design that manufactures the
 //! delete-the-lock workaround I4's decision warns against, and
 //! unlinking on `Drop` is the classic two-holders race. Two opens in one
@@ -59,6 +60,18 @@
 //! asserted by test, not assumed. Residue: local filesystems only — NFS lock
 //! emulation can make this silently meaningless and `std` has no `statfs`.
 //! Cost: workspace MSRV 1.77 → 1.89.
+//!
+//! **On Windows the same call is `LockFileEx`**, exclusive and failing
+//! immediately, over a range no file reaches, and the property above survives
+//! it: the system releases a terminated process's locks, so the lock file is
+//! never the remedy there either, and a second open in the same process is
+//! refused as it is by `flock`. Microsoft's own note on it adds one residue:
+//! the release follows termination after a time that "depends upon available
+//! system resources". A lock can therefore outlive its holder briefly, which
+//! an operator meets as `Locked` from a process that has already exited -- a
+//! refusal, and so the fail-closed direction, gone on a retry. Whether an SMB
+//! share honours the lock between machines is not established, which is the
+//! NFS residue in its Windows form.
 //!
 //! **The file's existence means nothing, and nothing reads it as meaning
 //! something.** Every refusal `open` makes after the `Missing` check
@@ -131,11 +144,28 @@
 //! or fsyncgate (after `EIO` the dirty pages may be gone — hence `Poisoned`,
 //! never retry). Rename atomicity is relied on for ext4/APFS/XFS/btrfs and is
 //! not detectable from `std` on FAT/exFAT/FUSE. Said here and at each proof.
+//!
+//! **On Windows the fourth step flushes nothing, and the power-loss half of
+//! I3 is not claimed there.** Win32 documents no call that commits a directory
+//! entry on NTFS; `medium::Disk::fsync_dir`'s Windows arm weighs the two
+//! candidates and states the hazard left -- a reservation lost to a power cut
+//! before the filesystem flushes its log, and a second spend signed at the
+//! same position. Rename atomicity is relied on for NTFS as for the Unix
+//! filesystems above, and Win32 does not document it either. Kills at a
+//! syscall boundary are covered by the same proofs on both platforms, and
+//! those proofs have run on Unix alone.
 
-#[cfg(not(unix))]
+// The storage guarantees, per platform, which the module's head states in
+// full: the four-step commit and the lock above rest on Unix's rename(2),
+// directory fsync and flock(2), and on Windows' replacing move and
+// LockFileEx with no directory flush at all (`medium::Disk::fsync_dir`'s
+// Windows arm says what that leaves). A target that is neither has had none
+// of that argued.
+#[cfg(not(any(unix, windows)))]
 compile_error!(
-    "the keystore relies on POSIX rename atomicity, directory fsync and flock; \
-     no non-unix target is supported"
+    "the keystore's storage guarantees are stated for Unix (rename atomicity, \
+     directory fsync, flock) and for Windows (the replacing move, LockFileEx, \
+     and no directory flush); this target is neither"
 );
 
 pub(crate) mod crypt;
@@ -169,7 +199,11 @@ use medium::{SNAPSHOT_NAME, TEMP_NAME};
 
 pub(crate) const LOCK_NAME: &str = "keystore.lock";
 
-/// Evidence that all four durable steps completed. Constructed at exactly one
+/// Evidence that all four durable steps completed. On Windows the fourth is
+/// empty, so there it witnesses a replacing move every other process can see
+/// and not one a power cut cannot undo -- the module's head says why.
+///
+/// Constructed at exactly one
 /// site in this crate (the `Ok` arm of [`Keystore::commit`]); the source scan
 /// `durable_witness_has_one_construction_site` holds that. Private field, so
 /// nothing outside the crate can forge one — `ui/fail/durable_is_not_constructible.rs`.

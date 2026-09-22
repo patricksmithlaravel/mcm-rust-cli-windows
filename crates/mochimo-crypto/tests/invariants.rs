@@ -2026,50 +2026,66 @@ fn key_signs_once_per_keystore_with_the_raw_signer_crate_private_not_absent() {
 /// The paired half is structural and needs no test: `render::outcome`
 /// matches `Outcome` exhaustively, so a variant added without a rendering is
 /// a compile error rather than a silent blank page.
-/// **The Unix surface is four files, and a port touches no others.**
+/// **The platform surface is the files the port touched, and no others.**
 ///
-/// This crate refuses to build off Unix, and says so twice -- `lib.rs` names
-/// the three interfaces it cannot do without and `keystore` names the storage
-/// guarantees it rests on. That refusal is a claim about the whole tree, and
-/// while the sites behind it can be anywhere it is prose checked against
-/// nothing: a mode bit added in a fifth file leaves both statements reading
-/// exactly the same.
+/// This crate builds for Unix and for Windows and refuses every other target,
+/// in `lib.rs` and again in `keystore`. Each platform supplies the three
+/// interfaces `lib.rs` names -- the permission model, the device secrets are
+/// read from, the entropy source -- and the keystore's storage primitives.
+/// Where those sites are is a claim about the whole tree, and while they can
+/// be anywhere it is prose checked against nothing: a mode bit or a Win32 call
+/// added in a new file leaves both statements reading exactly the same.
 ///
-/// So the surface is enumerated here rather than described. Four files, each
-/// for a different reason:
+/// So the surface is enumerated rather than described, one needle per kind of
+/// site, over comment-stripped code:
 ///
-/// * `keystore/perms.rs` -- the only user of `std::os::unix`, which is the
-///   whole of the permission model. This is what `perms` exists for and the
-///   check that keeps it true.
-/// * `bin/mcm-wallet.rs` -- the device paths and the `stty` subprocess. The
-///   library reaches neither: entropy is a parameter and the prompts go
-///   through `cli::create::Terminal`, so this half of the surface is the
-///   binary's alone.
-/// * `lib.rs` and `keystore/mod.rs` -- the two `compile_error!` gates.
-///
-/// `lib.rs` appears twice because its gate's MESSAGE names the device paths
-/// it is refusing to do without. That is prose inside a string rather than a
-/// site, and the check counts it anyway: an enumeration that quietly forgave
-/// one kind of occurrence would be one nobody could read against a grep.
+/// * `std::os::unix` -- `keystore/perms.rs`, the Unix permission model.
+/// * `std::os::windows` and `windows_sys` -- `keystore/perms/windows.rs`, the
+///   Windows permission model; `bin/mcm-wallet.rs`, the console and the
+///   generator; and, for `windows_sys` alone, `keystore/medium.rs`, which
+///   names the two error codes a held file produces on a replacing move.
+/// * `/dev/` and `"stty"` -- `bin/mcm-wallet.rs`. The library reaches neither:
+///   entropy is a parameter and the prompts go through `cli::create::Terminal`.
+/// * `cfg(unix)` and `cfg(windows)` -- the files holding a per-platform arm.
+///   `medium.rs` is here though no platform API is named in its Unix arm: its
+///   sites are `std::fs` calls that compile everywhere and behave differently,
+///   which a scan by API name cannot find, so the arm's attribute is what
+///   makes it enumerable at all. `error.rs` is here for its two Windows-only
+///   variants. `perms/windows.rs` is not, because it is gated whole at its
+///   `mod` line in `perms.rs`.
+/// * `cfg(not(any(unix, windows)))` -- `lib.rs` and `keystore/mod.rs`, the two
+///   gates that refuse every other target.
 ///
 /// # What this is for
 ///
-/// A downstream tree that wants another platform edits these four files and
-/// no others. That is worth having as a checked property rather than a
-/// remembered one, because the cost of it going stale is not a broken build
-/// -- it is a port that takes a week instead of an afternoon, discovered by
-/// whoever is doing the porting.
+/// The upstream tree this one forks from is Unix-only, and its version of
+/// this check lists the four files a port would have to touch. This version
+/// lists what the port did touch, and the difference between the two is the
+/// port's footprint in the source, readable here rather than reconstructed
+/// from a diff. A file joining a row is a new place a platform decision lives,
+/// and the failure message says where it should have gone instead.
+///
+/// The test keeps the name it has upstream on purpose. A renamed test is a
+/// conflict at every merge that touches it, and the name still says what the
+/// check is for.
 #[test]
 fn the_unix_surface_is_confined_to_the_files_a_port_would_touch() {
     const PERMS: &str = "crates/mochimo-crypto/src/keystore/perms.rs";
+    const PERMS_WINDOWS: &str = "crates/mochimo-crypto/src/keystore/perms/windows.rs";
+    const MEDIUM: &str = "crates/mochimo-crypto/src/keystore/medium.rs";
+    const ERROR: &str = "crates/mochimo-crypto/src/error.rs";
     const BIN: &str = "crates/mochimo-crypto/src/bin/mcm-wallet.rs";
     const LIB: &str = "crates/mochimo-crypto/src/lib.rs";
     const KEYSTORE: &str = "crates/mochimo-crypto/src/keystore/mod.rs";
-    const SURFACE: [(&str, &[&str]); 4] = [
+    const SURFACE: [(&str, &[&str]); 8] = [
         ("std::os::unix", &[PERMS]),
-        ("/dev/", &[BIN, LIB]),
+        ("std::os::windows", &[PERMS_WINDOWS, BIN]),
+        ("windows_sys", &[PERMS_WINDOWS, MEDIUM, BIN]),
+        ("/dev/", &[BIN]),
         ("\"stty\"", &[BIN]),
-        ("cfg(not(unix))", &[KEYSTORE, LIB]),
+        ("cfg(unix)", &[PERMS, MEDIUM, BIN]),
+        ("cfg(windows)", &[PERMS, MEDIUM, ERROR, BIN]),
+        ("cfg(not(any(unix, windows)))", &[KEYSTORE, LIB]),
     ];
 
     let files = crate_sources();
@@ -2090,11 +2106,11 @@ fn the_unix_surface_is_confined_to_the_files_a_port_would_touch() {
         want.sort_unstable();
         assert_eq!(
             found, want,
-            "the Unix surface moved: `{needle}` is named by a different set of files than this \
-             check enumerates.\n  found:    {found:?}\n  expected: {want:?}\nA new file here is \
-             a fifth place a port has to find. Either put the site behind `keystore::perms` (for \
-             the library) or the binary's own terminal and entropy code, or add the file to this \
-             list with the reason it cannot go in either."
+            "the platform surface moved: `{needle}` is named by a different set of files than \
+             this check enumerates.\n  found:    {found:?}\n  expected: {want:?}\nA new file \
+             here is a new place a platform decision lives. Either put the site behind \
+             `keystore::perms` (for the library) or the binary's own terminal and entropy code, \
+             or add the file to this list with the reason it cannot go in either."
         );
     }
 }

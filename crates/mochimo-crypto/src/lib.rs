@@ -30,6 +30,30 @@
 //! `tests/cli.rs` runs it under a pseudo-terminal -- so everything above is
 //! linked and loaded on every board run. But no test completes a handshake,
 //! so nothing here exercises that stack against a peer.
+//!
+//! # The platforms, and the three interfaces each supplies
+//!
+//! This crate targets **Unix and Windows**, and is built and tested on Linux
+//! and macOS. Three interfaces it needs have no portable stand-in, so each
+//! platform supplies its own, and a build for any other target fails at
+//! compile time rather than degrading:
+//!
+//! | interface | Unix | Windows |
+//! | --- | --- | --- |
+//! | the keystore's permission model, a check against another local user rather than a convenience | mode bits: the store is created `0600` and its directory `0700`, and a directory that is group- or world-writable is refused | access lists: created with a protected list granting this user alone, and a directory anyone but this user, `SYSTEM` or the Administrators group can write to is refused |
+//! | where the password and the recovery phrase are read, so that neither can be piped or redirected | `/dev/tty`, by path, with echo turned off by `stty` | the console's own buffers, `CONIN$` and `CONOUT$`, by name, with echo turned off in the console mode |
+//! | entropy | `/dev/urandom` | `BCryptGenRandom`, the system-preferred generator |
+//!
+//! The first is `keystore::perms` and its Windows arm; the other two are the
+//! binary's, since the library takes entropy as a parameter and prompts
+//! through `cli::create::Terminal`. `keystore` states the storage guarantees
+//! it rests on, per platform, beside its own gate.
+//!
+//! **The two columns are not established to the same degree.** The Unix
+//! column is what every board run measures. The Windows column compiles and
+//! passes clippy for `x86_64-pc-windows-msvc`; the tests that would measure it
+//! run on a Windows host, and `RELEASE.md` is where a run is recorded. The
+//! BSDs have all three Unix interfaces and are untested.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -70,20 +94,21 @@ compile_error!(
      cannot compute anything."
 );
 
-// The crate-level platform statement. `keystore` carries its own for the
-// storage guarantees it rests on, so a non-unix build is told about both the
-// interfaces named here and the ones that module needs.
-#[cfg(not(unix))]
+// The crate-level platform statement is the table in the head of this file,
+// per platform. What is left for a gate is every target that table does not
+// name: the three interfaces have an implementation on Unix and one on
+// Windows, and a third platform would be a third column nobody has written.
+// `keystore` carries its own gate for the storage guarantees it rests on, so
+// such a build is told about both.
+#[cfg(not(any(unix, windows)))]
 compile_error!(
-    "mochimo-crypto targets Unix, and is built and tested on Linux and macOS. \
-     Windows is not a goal. Three interfaces it needs have no portable \
-     stand-in here: the keystore's permission model is Unix mode bits -- the \
-     store is created 0600 and its directory 0700, and a store whose directory \
-     is group- or world-writable is refused, which is a check against another \
-     local user rather than a convenience; the password and the recovery \
-     phrase are read from /dev/tty by path, so that neither can be piped or \
-     redirected; and entropy is read from /dev/urandom. The BSDs have all \
-     three and are untested."
+    "mochimo-crypto targets Unix and Windows. Three interfaces it needs have no \
+     portable stand-in, and each of those platforms supplies its own: the \
+     keystore's permission model (Unix mode bits; Windows access lists), the \
+     device the password and recovery phrase are read from so that neither can \
+     be piped or redirected (the controlling terminal; the console), and the \
+     entropy source (the kernel's generator; BCryptGenRandom). This target is \
+     neither, and has none of the three here."
 );
 
 /// The backend seam is public **only under `raw-backend`**, the test tree's

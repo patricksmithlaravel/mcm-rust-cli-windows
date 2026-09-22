@@ -270,7 +270,8 @@ chacha20poly1305 = { version = "0.10", default-features = false, optional = true
 #
 # The two binary-only features are in the library's dependency line because a
 # `[[bin]]` has no dependency table of its own. The library does not import
-# either module.
+# either module, and the surface check in `tests/invariants.rs` names every
+# file that imports `windows_sys` at all.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",

@@ -1027,11 +1027,13 @@ Every refusal `open` makes after its missing-snapshot check leaves the lock file
 
 The lock is meaningful on local filesystems only. NFS lock emulation can make it silently meaningless, and the crate cannot detect that.
 
+On Windows the same call is `LockFileEx`, exclusive and failing immediately, and the property above survives: the system releases a terminated process's locks, and a second open in one process is refused. Microsoft documents that the release follows termination after a time that depends on available system resources, so a lock can briefly outlive its holder; that is met as `Locked` and is gone on a retry. Whether an SMB share honours the lock between machines is not established.
+
 ### What `open` and `create` refuse
 
-`open` refuses a group- or other-writable directory (`UnsafePermissions`, carrying the mode), a directory with no snapshot (`Missing` — an absent file is not an empty store), a live lock holder (`Locked`), and a snapshot that grows between its `stat` and its read (corrupt at `snapshot grew while being read`). A stale `accounts.mks.tmp` is unlinked after the lock is taken and is never adopted, even when it would parse: two files must never both be authorities.
+`open` refuses a group- or other-writable directory (`UnsafePermissions`, carrying the mode; on Windows, a directory anyone but this user, `SYSTEM` or the Administrators group can write to, or that another user owns — `UnsafeAcl`, carrying the trustee and the rights), a directory with no snapshot (`Missing` — an absent file is not an empty store), a live lock holder (`Locked`), and a snapshot that grows between its `stat` and its read (corrupt at `snapshot grew while being read`). A stale `accounts.mks.tmp` is unlinked after the lock is taken and is never adopted, even when it would parse: two files must never both be authorities.
 
-`create` makes the directory with mode 0700 if it is absent, refuses a group- or other-writable directory, refuses a directory that already holds a snapshot (`Exists`), refuses a live lock holder, and asks the existence question again under the lock before sealing anything. It does not unlink a stale `accounts.mks.tmp` itself; its first commit does, as every commit does.
+`create` makes the directory with mode 0700 if it is absent (on Windows, under a protected access list granting this user alone, inherited by what is created inside it), refuses a group- or other-writable directory, refuses a directory that already holds a snapshot (`Exists`), refuses a live lock holder, and asks the existence question again under the lock before sealing anything. It does not unlink a stale `accounts.mks.tmp` itself; its first commit does, as every commit does.
 
 ### How a file is replaced
 
@@ -1039,7 +1041,11 @@ Every write is four steps in this order: write the whole image to `accounts.mks.
 
 If any step fails, the handle is poisoned: every later call that reads or writes the store's state fails, and the fix is to drop it and reopen from disk. Nothing is retried.
 
-This relies on POSIX rename atomicity, directory `fsync` and `flock`. Two limits are stated rather than detected: it does not survive an `fsync` that lies, and rename atomicity is not detectable from the standard library on FAT, exFAT or FUSE. The build is Unix-only and refuses to compile elsewhere.
+On Unix this relies on POSIX rename atomicity, directory `fsync` and `flock`. Two limits are stated rather than detected: it does not survive an `fsync` that lies, and rename atomicity is not detectable from the standard library on FAT, exFAT or FUSE.
+
+On Windows the temp is created under a protected access list granting this user alone, and the snapshot keeps that list through the rename. The rename is `MoveFileExW` replacing the target, relied on to be atomic on NTFS as the rename is on the Unix filesystems above, which Win32 does not document either. **The fourth step flushes nothing on Windows**: Win32 documents no call that commits a directory entry on NTFS, so the step performs no I/O and the power-loss half of I3 has no mechanism behind it there. A power cut or an operating-system crash before NTFS flushes its log can bring back the previous snapshot; if the lost commit reserved a key whose spend has not settled, the next spend can sign the same position, and reconciliation catches that only once the first spend is on the chain. `keystore::medium::Disk::fsync_dir`'s Windows arm weighs the two candidate substitutes and says why each is refused. A rename refused because another process holds the snapshot or the temp open without delete sharing is `ReplaceRefused`; it changes nothing, and the handle is poisoned as after any failed step.
+
+The build refuses to compile for any target that is neither Unix nor Windows.
 
 ### The captured images
 
@@ -1585,6 +1591,8 @@ The account's key position, the store generation, the open reservation and the r
 
 **Limit.** The same crash model as I2. Nothing mechanical fixes the membership of "spend-related state": a fifth member added later is covered by this invariant's prose and by no check here.
 
+**On Windows, the power-loss half has no mechanism.** I2 already places power loss outside what anything here establishes; on Unix the directory `fsync` is the mechanism aimed at it, untested against a real power cut. On Windows the fourth step performs no I/O, because Win32 documents no call that commits a directory entry on NTFS, so there is not even a mechanism to leave untested. *How a file is replaced* states the hazard that leaves.
+
 ### I4 — every account reconciles before that account acts
 
 When an account's local key position and the chain disagree, that account does not act. The wallet type has one constructor and it reconciles every account against the chain, partitioning them: the accounts the node confirmed, and the accounts it could not explain. Every operation on an account in the second set is refused by name and carries that account's whole report. A store in which *no* account reconciled offers no action at all and is refused outright, which is what the startup refusal is for. The wallet hands out a read-only view of its store and has no mutable counterpart.
@@ -1667,19 +1675,19 @@ These are not numbered and are enforced the same way.
 
 Everything below is a present-tense property of the wallet as it ships. None of it is scheduled work.
 
-### The platform is Unix
+### The platforms are Unix and Windows
 
-This wallet targets Unix. It is built and tested on **Linux** and **macOS**. Windows is not a goal, and a non-unix build fails at compile time rather than degrading: `lib.rs` names the three interfaces the crate needs and `keystore` names the storage guarantees it rests on.
+This wallet targets Unix and Windows. It is built and tested on **Linux** and **macOS**. **The Windows arms compile and pass clippy for `x86_64-pc-windows-msvc`, and have not run**: no board has been recorded on Windows, and `RELEASE.md` is where one will be. A build for any other target fails at compile time rather than degrading: `lib.rs` names the three interfaces the crate needs and `keystore` names the storage guarantees it rests on.
 
 Three things make it so, and none of them is a convenience:
 
-| interface | what depends on it |
-| --- | --- |
-| Unix mode bits | the store is created `0600` and its directory `0700`, and both creating and opening a store refuse a directory that is group- or world-writable (`Error::UnsafePermissions`). This is a check against another local user; the Windows equivalent is a DACL and a second implementation of it |
-| `/dev/tty`, opened by path | the password and the recovery phrase are read from the controlling terminal, so neither can be piped or redirected into the process; echo is turned off by `stty` |
-| `/dev/urandom`, read through `std::fs` | the salt and the nonce seed the binary supplies to the keystore |
+| interface | Unix | Windows |
+| --- | --- | --- |
+| the keystore's permission model, a check against another local user | mode bits: the store is created `0600` and its directory `0700`, and both creating and opening a store refuse a directory that is group- or world-writable (`Error::UnsafePermissions`) | access lists: the directory and every file are created under a protected list granting this user alone, and both creating and opening a store refuse a directory anyone but this user, `SYSTEM` or the Administrators group can write to, or that another user owns (`Error::UnsafeAcl`) |
+| where the password and the recovery phrase are read, so that neither can be piped or redirected | `/dev/tty`, opened by path; echo turned off by `stty` | the console's own buffers, `CONIN$` and `CONOUT$`, opened by name; echo turned off in the console mode; read and written as UTF-16, so a password is the same bytes on every platform |
+| the salt and the nonce seed the binary supplies to the keystore | `/dev/urandom`, read through `std::fs` | `BCryptGenRandom`, the system-preferred generator |
 
-The keystore additionally rests on POSIX rename atomicity, directory `fsync` and `flock`, which is why that module carries its own statement.
+The keystore additionally rests on storage primitives that are not the same on the two, which is why that module carries its own statement: on Unix, POSIX rename atomicity, directory `fsync` and `flock`; on Windows, the replacing move, `LockFileEx`, and no directory flush at all — *How a file is replaced* says what that last one leaves.
 
 The BSDs have all of these. Nothing in this repository builds or tests against them, so they are neither supported nor known to fail.
 
