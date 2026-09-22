@@ -129,6 +129,29 @@ pub enum Error {
     UnsafePermissions {
         mode: u32,
     },
+    /// The keystore directory's access list lets someone other than this
+    /// user, `SYSTEM` or the Administrators group write to it: the Windows
+    /// arm of [`Error::UnsafePermissions`].
+    ///
+    /// **A separate variant, not that one reporting a mode it did not
+    /// measure.** `UnsafePermissions` carries `mode: u32` and renders it as
+    /// octal; a Windows directory has no mode, and a number synthesised to
+    /// fill the field would be a refusal whose evidence is invented. Adding a
+    /// Windows-only variant leaves the Unix variant's shape, and every match
+    /// on it, exactly as it is.
+    ///
+    /// `trustee` is the security identifier the write is granted to, in its
+    /// `S-1-...` form -- `S-1-1-0`, Everyone, when the directory has no access
+    /// list at all, since that is what a null list grants. `rights` is the
+    /// access mask of the entry that grants it, or `WRITE_DAC | READ_CONTROL`
+    /// for a directory owned by someone else, which is what an owner holds
+    /// whatever the list says. Which trustees are accepted and which rights
+    /// count as write is argued at `keystore::perms`'s Windows arm.
+    #[cfg(windows)]
+    UnsafeAcl {
+        trustee: String,
+        rights: u32,
+    },
     /// Windows refused to move the new snapshot over the old one, with the
     /// system error `code` -- `ERROR_ACCESS_DENIED` or
     /// `ERROR_SHARING_VIOLATION`, the two a held file produces.
@@ -528,6 +551,13 @@ impl fmt::Display for Error {
             Error::UnsafePermissions { mode } => write!(
                 f,
                 "keystore directory mode {mode:o} is group- or other-writable; refusing to \
+                 hold key material there"
+            ),
+            #[cfg(windows)]
+            Error::UnsafeAcl { trustee, rights } => write!(
+                f,
+                "keystore directory lets {trustee} write to it (access mask {rights:#010x}), and \
+                 {trustee} is neither this user, SYSTEM nor the Administrators group; refusing to \
                  hold key material there"
             ),
             #[cfg(windows)]

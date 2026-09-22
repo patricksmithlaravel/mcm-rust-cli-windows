@@ -246,9 +246,29 @@ chacha20poly1305 = { version = "0.10", default-features = false, optional = true
 # * `Win32_Foundation` -- the two error codes `keystore::medium` names when a
 #   replacing move is refused by a held file, read from the generated
 #   constants rather than retyped, by the rule `consts` states for protocol
-#   constants.
+#   constants; and the handle, `LocalFree` and the generic rights the
+#   permission model below uses.
+# * `Win32_Security`, `Win32_Security_Authorization` -- the permission model:
+#   the process token's user, a directory's owner and access list, the SID
+#   strings they are compared as, and the descriptor a file is created under.
+#   `std` reads no security descriptor and creates no file under one, which is
+#   the whole reason `keystore::perms` has a Windows arm of its own.
+# * `Win32_Storage_FileSystem` -- `CreateFileW` and `CreateDirectoryW`, which
+#   take that descriptor at creation, and the file and directory rights the
+#   access-list check counts as write.
+# * `Win32_System_SystemServices` -- the access-control entry type codes the
+#   check dispatches on.
+# * `Win32_System_Threading` -- `OpenProcessToken` and `GetCurrentProcess`, to
+#   ask whose process this is.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_SystemServices",
+    "Win32_System_Threading",
+] }
 
 # The shipped binary. Built with `mesh-https`, so it links rustls and
 # `ring`'s C; the board builds and drives it in a subprocess through

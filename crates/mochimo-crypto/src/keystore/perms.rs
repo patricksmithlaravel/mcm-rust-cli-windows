@@ -27,15 +27,25 @@
 //! separate call sites of a mode are six chances to create a file this
 //! crate's own platform statement does not describe.
 //!
-//! # What this module is not
+//! # Two arms, one set of names
 //!
-//! **It is not a portability layer.** There is no second implementation behind
-//! it, no `cfg`, and no trait. A non-unix build fails at `lib.rs`'s
-//! `compile_error!` and again at [`crate::keystore`]'s, exactly as it did
-//! before this module existed, and nothing here is a step toward changing
-//! that. What it changes is that the Unix surface is locatable rather than
-//! scattered, which is worth having whether or not anything is ever built on
-//! it.
+//! The functions below are the Unix arm. The Windows arm is [`windows`], a
+//! file of its own, and it supplies the same four functions under the same
+//! names and signatures, so no caller in `keystore` carries a `cfg`: the
+//! platform is decided here and nowhere above. **There is no trait**, because
+//! nothing ever chooses between the arms at run time -- a build has exactly
+//! one, and a trait would be an interface with one implementation per binary.
+//!
+//! The Windows arm is a separate file rather than a second block in this one
+//! so that this file stays the Unix arm and nothing else. The Unix arm is
+//! what the command-line wallet upstream of this tree ships, and a change
+//! there merges into this file without meeting the Windows code.
+//!
+//! What the arms share is the standard, not the mechanism: each makes a
+//! directory and files only its owner can reach, and each refuses a
+//! directory another local user can write to. How far the second arm is
+//! established is stated at its head, and the short answer is that it
+//! compiles.
 //!
 //! # The shape of the public error, stated because it is not obvious
 //!
@@ -50,11 +60,20 @@
 //! inferred, because it is the part of the permission model that is visible
 //! from outside the crate and the only part a dependent can come to depend on.
 
+#[cfg(unix)]
 use std::fs::{self, File, OpenOptions};
+#[cfg(unix)]
 use std::os::unix::fs::{DirBuilderExt, MetadataExt, OpenOptionsExt};
+#[cfg(unix)]
 use std::path::Path;
 
+#[cfg(unix)]
 use crate::error::{Error, Result};
+
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+pub(crate) use windows::{create_private_dir, create_private_file, open_private_lock, refuse_unsafe_dir};
 
 /// The mode every file this crate creates is created with: owner read and
 /// write, nothing for anyone else.
@@ -64,6 +83,7 @@ use crate::error::{Error, Result};
 /// than a root; the lock file holds no bytes at all. Neither is key material
 /// and both are still nobody else's, which is the same standard the directory
 /// check below applies and the reason one constant serves both.
+#[cfg(unix)]
 pub(crate) const FILE_MODE: u32 = 0o600;
 
 /// The mode the store directory is created with **when this crate creates
@@ -72,6 +92,7 @@ pub(crate) const FILE_MODE: u32 = 0o600;
 /// A directory this crate did not create keeps whatever mode it has, and is
 /// then held to [`refuse_unsafe_dir`] instead. The two are not the same
 /// standard and deliberately so: this is what we make, that is what we accept.
+#[cfg(unix)]
 pub(crate) const DIR_MODE: u32 = 0o700;
 
 /// The bits whose presence on the store directory is a refusal: group-write
@@ -84,6 +105,7 @@ pub(crate) const DIR_MODE: u32 = 0o700;
 /// directly. The check is aimed at the second and says nothing about the
 /// first, and widening it to `0o077` would refuse the mode a great many
 /// home directories already carry for a property this crate does not rest on.
+#[cfg(unix)]
 const REFUSED_WRITE_BITS: u32 = 0o022;
 
 /// Refuse a store directory another local user could write to.
@@ -95,6 +117,7 @@ const REFUSED_WRITE_BITS: u32 = 0o022;
 /// same `op` as the stat that found it, rather than as a permission problem:
 /// the caller named something that cannot hold a store, which is a different
 /// mistake from naming a directory that should not.
+#[cfg(unix)]
 pub(crate) fn refuse_unsafe_dir(dir: &Path) -> Result<()> {
     let meta = fs::metadata(dir).map_err(|e| Error::Io {
         op: "stat directory",
@@ -122,6 +145,7 @@ pub(crate) fn refuse_unsafe_dir(dir: &Path) -> Result<()> {
 /// `std::io::Result`, not this crate's: the one caller already names the `op`
 /// this failure is reported under, and moving that name in here would put
 /// half of one error's vocabulary in a second file.
+#[cfg(unix)]
 pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
     fs::DirBuilder::new().mode(DIR_MODE).create(dir)
 }
@@ -132,6 +156,7 @@ pub(crate) fn create_private_dir(dir: &Path) -> std::io::Result<()> {
 /// `open` applies only when the file is created, and a truncated leftover
 /// carries its own permissions through to whatever is written into it. The
 /// caller that needs the leftover gone unlinks it first.
+#[cfg(unix)]
 pub(crate) fn create_private_file(path: &Path) -> std::io::Result<File> {
     OpenOptions::new()
         .create_new(true)
@@ -148,6 +173,7 @@ pub(crate) fn create_private_file(path: &Path) -> std::io::Result<File> {
 /// store, and a `create(true).truncate(true)` here would rewrite a file
 /// another process may hold at exactly the moment this one is finding out
 /// whether it does.
+#[cfg(unix)]
 pub(crate) fn open_private_lock(path: &Path) -> std::io::Result<File> {
     OpenOptions::new()
         .read(true)

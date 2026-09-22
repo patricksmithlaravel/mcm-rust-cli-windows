@@ -1,0 +1,502 @@
+//! The Windows permission model: the second arm of [`super`], and one of the
+//! two files under `src/` that hold `unsafe` -- the binary's console is the
+//! other.
+//!
+//! # The same two standards, in access-control lists
+//!
+//! The Unix arm makes one thing and accepts another: it creates at `0700` and
+//! `0600`, and it refuses a directory another local user can write to. This
+//! arm keeps both standards and changes only what they are written in.
+//!
+//! | Unix arm | this arm |
+//! | --- | --- |
+//! | directory created `0700` | directory created with a protected access list granting this user full control and nobody else anything, inherited by what is created inside it |
+//! | file created `0600` | file created with a protected access list granting this user full control and nobody else anything |
+//! | refuse group- or other-write | refuse an access list that lets anyone but this user, `SYSTEM` or the Administrators group write, and refuse a directory owned by anyone else |
+//!
+//! **The descriptor is given to `CreateFileW` and `CreateDirectoryW`, not set
+//! afterwards.** Access is checked when a handle is opened, so a file created
+//! with an inherited access list and restricted a moment later can already be
+//! open, for writing, in another user's process -- and that handle keeps its
+//! rights after the list changes. The Unix arm passes the mode to `open` for
+//! the same reason. `std`'s `OpenOptions` takes no security descriptor on
+//! Windows, which is the whole reason this file calls `CreateFileW` itself.
+//!
+//! **Protected, so nothing is inherited.** A descriptor without the protected
+//! flag merges the parent's inheritable entries into the one given, and a
+//! parent can carry an entry that applies to children only -- `Authenticated
+//! Users` with modify rights on everything created under `C:\` is the stock
+//! example. The given list is then not the list the file has.
+//!
+//! # Which trustees are accepted, and why those three
+//!
+//! This user, because the store is theirs. `SYSTEM` and the Administrators
+//! group, because they are what `root` is on the Unix arm: the mode check
+//! never asks about `root` either, since no permission bit binds it, and on
+//! Windows the Administrators group can take ownership of any object whatever
+//! its list says. Refusing a directory because an administrator could write to
+//! it would refuse every home directory on the platform and protect against
+//! nobody who could not take the file anyway. `OWNER RIGHTS` (`S-1-3-4`) is
+//! accepted because it names the owner, and the owner is checked on its own.
+//!
+//! The strings are Windows' well-known security identifiers in the form
+//! `ConvertSidToStringSidW` prints them, compared as strings to the same
+//! function's output for each entry. They are retyped rather than generated,
+//! against the rule `consts` states for protocol constants, and the argument
+//! is that they are not this protocol's constants: they are part of the
+//! documented interface of every Windows since NT, and a SID that changed
+//! would break every access list on the machine before it broke this check.
+//!
+//! **The owner is a writer.** An object's owner may rewrite its access list
+//! whatever the list says, so a directory owned by another user is one that
+//! user can open to themselves at will. It is refused as a grant of
+//! `WRITE_DAC` to that user, which is the right an owner holds implicitly.
+//!
+//! # Which rights count as write
+//!
+//! The ones that change what the directory names or who may change it:
+//! adding a file or a subdirectory, deleting a child, deleting or renaming
+//! the directory itself, rewriting its list or its owner, and the two generic
+//! rights that map onto those. **Write, and not read**, for the Unix arm's
+//! reason: a co-user who can list the directory learns that a store exists,
+//! which is metadata; a co-user who can delete a child can move the snapshot
+//! out from under a live handle, which defeats the commit's atomicity
+//! directly. `FILE_WRITE_ATTRIBUTES` and `FILE_WRITE_EA` are left out: they
+//! change the directory's own attributes and not what it names.
+//!
+//! Entries that apply only to children are skipped, because this module gives
+//! every file it creates its own protected list and nothing inherits from the
+//! directory. Denying entries are skipped too, which makes the check stricter
+//! than the effective access it approximates: a grant followed by a denial of
+//! the same right is refused here although Windows would not honour it. That
+//! is the fail-closed direction, and computing effective access properly is
+//! `AuthzAccessCheck` and a resource manager, for a case no default access
+//! list produces. An entry of a type this check does not read is refused
+//! rather than skipped, for the same reason.
+//!
+//! **No access list at all is a refusal.** A null DACL grants every right to
+//! everyone, and it is what a volume with no access control reports -- FAT
+//! and exFAT, the removable-media case. It is refused as a grant to Everyone.
+//!
+//! # Why the `unsafe` is here and not elsewhere
+//!
+//! None of this has a `std` interface: `std` neither reads a security
+//! descriptor nor creates a file under one. Every call below is a plain Win32
+//! function through `windows-sys`, and every `unsafe` block carries the
+//! condition it relies on. The library's boundary is this file and nothing
+//! else: `unsafe_is_confined_to_declared_files` names it, and Miri, which interprets
+//! Rust and cannot interpret a foreign call, walks none of it -- nor could it,
+//! since the Miri run is on a Unix host where this file is not compiled.
+//!
+//! # What is not established
+//!
+//! **None of this has run.** It compiles and passes clippy for
+//! `x86_64-pc-windows-msvc`, from a macOS host; it has not executed on
+//! Windows. Every claim above about what Windows does is read from Microsoft's
+//! documentation and `std`'s source, and the tests that would measure them on
+//! the Unix arm -- `tests/keystore.rs`'s mode assertions -- are Unix-only.
+
+use std::ffi::c_void;
+use std::fs::{self, File};
+use std::io;
+use std::os::windows::ffi::OsStrExt;
+use std::os::windows::io::{FromRawHandle, OwnedHandle};
+use std::path::Path;
+use std::ptr;
+
+use windows_sys::Win32::Foundation::{
+    LocalFree, ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+};
+use windows_sys::Win32::Security::Authorization::{
+    ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
+    SDDL_REVISION_1, SE_FILE_OBJECT,
+};
+use windows_sys::Win32::Security::{
+    GetAce, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION,
+    INHERIT_ONLY_ACE, OWNER_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
+    TOKEN_QUERY, TOKEN_USER,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    CreateDirectoryW, CreateFileW, CREATE_NEW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
+    FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+};
+use windows_sys::Win32::System::SystemServices::{
+    ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
+    ACCESS_DENIED_CALLBACK_ACE_TYPE, ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE, ACCESS_DENIED_OBJECT_ACE_TYPE,
+};
+use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
+
+use crate::error::{Error, Result};
+
+/// `NT AUTHORITY\SYSTEM`.
+const SYSTEM: &str = "S-1-5-18";
+/// `BUILTIN\Administrators`.
+const ADMINISTRATORS: &str = "S-1-5-32-544";
+/// `OWNER RIGHTS`: whoever owns the object, which is checked separately.
+const OWNER_RIGHTS: &str = "S-1-3-4";
+/// `Everyone`, named in a refusal when the directory has no access list.
+const EVERYONE: &str = "S-1-1-0";
+
+/// The rights whose grant to anyone else is a refusal. See the module doc.
+const WRITE_RIGHTS: u32 = FILE_ADD_FILE
+    | FILE_ADD_SUBDIRECTORY
+    | FILE_DELETE_CHILD
+    | DELETE
+    | WRITE_DAC
+    | WRITE_OWNER
+    | GENERIC_WRITE
+    | GENERIC_ALL;
+
+/// The share mode `std`'s `OpenOptions` opens with by default, so a file
+/// created here is shared exactly as one created through `std` would be.
+const STD_SHARE_MODE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+/// Refuse a store directory another local user could write to.
+///
+/// The Windows arm of the function by this name in [`super`]; the stat and
+/// the not-a-directory refusal are that arm's, under the same `op`, so the
+/// two platforms refuse a non-directory identically.
+pub(crate) fn refuse_unsafe_dir(dir: &Path) -> Result<()> {
+    let meta = fs::metadata(dir).map_err(|e| Error::Io {
+        op: "stat directory",
+        kind: e.kind(),
+    })?;
+    if !meta.is_dir() {
+        return Err(Error::Io {
+            op: "stat directory",
+            kind: io::ErrorKind::NotADirectory,
+        });
+    }
+    let user = current_user().map_err(|e| Error::Io {
+        op: "read the process token",
+        kind: e.kind(),
+    })?;
+    let security = Security::of(dir).map_err(|e| Error::Io {
+        op: "read the directory's access list",
+        kind: e.kind(),
+    })?;
+    let owner = sid_string(security.owner).map_err(|e| Error::Io {
+        op: "read the directory's owner",
+        kind: e.kind(),
+    })?;
+    if !accepted(&owner, &user) {
+        return Err(Error::UnsafeAcl {
+            trustee: owner,
+            rights: WRITE_DAC | READ_CONTROL,
+        });
+    }
+    match security.foreign_writer(&user) {
+        Ok(None) => Ok(()),
+        Ok(Some((trustee, rights))) => Err(Error::UnsafeAcl { trustee, rights }),
+        Err(e) => Err(Error::Io {
+            op: "read the directory's access list",
+            kind: e.kind(),
+        }),
+    }
+}
+
+/// Create the store directory under a protected list granting this user
+/// full control, inherited by every file and directory created inside it.
+///
+/// The Windows arm of [`super`]'s function by this name. Like the mode on
+/// Unix, the list applies only on creation, which is why the caller asks this
+/// only when the directory is absent and asks [`refuse_unsafe_dir`] either way.
+pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
+    let descriptor = Private::descriptor(Inherit::Children)?;
+    let attributes = descriptor.attributes();
+    let path = wide(dir)?;
+    // SAFETY: `path` is a NUL-terminated UTF-16 buffer that outlives the call,
+    // and `attributes` points at a descriptor `descriptor` keeps alive until
+    // after the call returns.
+    if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+/// Create a file under a protected list granting this user full control,
+/// failing if it already exists.
+///
+/// The Windows arm of [`super`]'s function by this name: write access,
+/// `CREATE_NEW`, and `FILE_FLAG_OPEN_REPARSE_POINT` because that is what
+/// `std` adds for `create_new` -- a link at the path is not followed.
+pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
+    open_under_private_list(path, GENERIC_WRITE, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT)
+}
+
+/// Open the lock file, creating it under a protected list granting this user
+/// full control if absent, and **never** truncating it.
+///
+/// `OPEN_ALWAYS` is Win32's create-if-absent without truncation, and the list
+/// applies only when it creates -- the Unix arm's mode rule, unchanged.
+pub(crate) fn open_private_lock(path: &Path) -> io::Result<File> {
+    open_under_private_list(path, GENERIC_READ | GENERIC_WRITE, OPEN_ALWAYS, 0)
+}
+
+fn open_under_private_list(path: &Path, access: u32, disposition: u32, flags: u32) -> io::Result<File> {
+    let descriptor = Private::descriptor(Inherit::Nothing)?;
+    let attributes = descriptor.attributes();
+    let path = wide(path)?;
+    // SAFETY: `path` is a NUL-terminated UTF-16 buffer and `attributes` points
+    // at a live descriptor, both outliving the call; the template handle is
+    // null, which the function accepts.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            access,
+            STD_SHARE_MODE,
+            &attributes,
+            disposition,
+            FILE_ATTRIBUTE_NORMAL | flags,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `handle` is a valid file handle this call just opened and that
+    // nothing else owns, so `OwnedHandle` may close it exactly once.
+    Ok(File::from(unsafe { OwnedHandle::from_raw_handle(handle) }))
+}
+
+fn accepted(sid: &str, user: &str) -> bool {
+    sid == user || sid == SYSTEM || sid == ADMINISTRATORS || sid == OWNER_RIGHTS
+}
+
+/// A path as the NUL-terminated UTF-16 a `W` function takes.
+///
+/// A path containing U+0000 is refused rather than truncated: the function
+/// would read up to the first one and act on a different path.
+fn wide(path: &Path) -> io::Result<Vec<u16>> {
+    let mut out: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if out.contains(&0) {
+        return Err(io::ErrorKind::InvalidInput.into());
+    }
+    out.push(0);
+    Ok(out)
+}
+
+/// Memory Win32 allocated and handed over, released with `LocalFree`.
+struct Local(*mut c_void);
+
+impl Drop for Local {
+    fn drop(&mut self) {
+        if !self.0.is_null() {
+            // SAFETY: every `Local` is built from a pointer a Win32 function
+            // documents as `LocalAlloc`ed and owned by the caller, and this is
+            // the only place it is freed.
+            unsafe { LocalFree(self.0) };
+        }
+    }
+}
+
+/// A SID in its `S-1-...` string form.
+fn sid_string(sid: PSID) -> io::Result<String> {
+    if sid.is_null() {
+        return Err(io::ErrorKind::InvalidData.into());
+    }
+    let mut text: *mut u16 = ptr::null_mut();
+    // SAFETY: `sid` is non-null and points at a SID inside a buffer the caller
+    // keeps alive for this call; `text` receives a `LocalAlloc`ed string.
+    if unsafe { ConvertSidToStringSidW(sid, &mut text) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    let owned = Local(text.cast());
+    let mut len = 0usize;
+    // SAFETY: the function returned a NUL-terminated string at `text`, so
+    // every offset up to and including the terminator is in bounds.
+    while unsafe { *text.add(len) } != 0 {
+        len += 1;
+    }
+    // SAFETY: `len` units starting at `text` were just read one by one.
+    let units = unsafe { std::slice::from_raw_parts(text, len) };
+    let out = String::from_utf16(units).map_err(|_| io::Error::from(io::ErrorKind::InvalidData));
+    drop(owned);
+    out
+}
+
+/// This process's user, as a SID string.
+fn current_user() -> io::Result<String> {
+    let mut raw: HANDLE = ptr::null_mut();
+    // SAFETY: `GetCurrentProcess` returns a pseudo-handle that needs no
+    // closing, and `raw` is a valid place for the token handle.
+    if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: `raw` is a token handle this call just opened and owns.
+    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let handle: HANDLE = std::os::windows::io::AsRawHandle::as_raw_handle(&token);
+    let mut len = 0u32;
+    // SAFETY: a null buffer of length zero is the documented size query; the
+    // call fails and writes the size needed to `len`.
+    unsafe { GetTokenInformation(handle, TokenUser, ptr::null_mut(), 0, &mut len) };
+    if len == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // `u64` elements so the `TOKEN_USER` at the front, which holds a pointer,
+    // is aligned for it.
+    let mut buf = vec![0u64; (len as usize).div_ceil(8)];
+    // SAFETY: `buf` holds at least `len` bytes, which is the size the query
+    // above asked for.
+    if unsafe { GetTokenInformation(handle, TokenUser, buf.as_mut_ptr().cast(), len, &mut len) } == 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // SAFETY: the call succeeded, so `buf` begins with a `TOKEN_USER` whose
+    // SID pointer points inside `buf`, which outlives this borrow.
+    let user = unsafe { &*buf.as_ptr().cast::<TOKEN_USER>() };
+    sid_string(user.User.Sid)
+}
+
+/// A directory's owner and access list, and the descriptor that holds both.
+struct Security {
+    owner: PSID,
+    dacl: *const ACL,
+    _descriptor: Local,
+}
+
+impl Security {
+    fn of(dir: &Path) -> io::Result<Security> {
+        let path = wide(dir)?;
+        let mut owner: PSID = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `path` is NUL-terminated and outlives the call; the group
+        // and SACL outputs are null, which the function accepts when their
+        // information is not requested; the descriptor it returns is
+        // `LocalAlloc`ed and owned here, and `owner` and `dacl` point into it.
+        let rc = unsafe {
+            GetNamedSecurityInfoW(
+                path.as_ptr(),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        let descriptor = Local(descriptor);
+        if rc != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+        Ok(Security {
+            owner,
+            dacl,
+            _descriptor: descriptor,
+        })
+    }
+
+    /// The first entry granting a write right to a trustee [`accepted`] does
+    /// not name, as that trustee and the rights the entry grants.
+    fn foreign_writer(&self, user: &str) -> io::Result<Option<(String, u32)>> {
+        if self.dacl.is_null() {
+            return Ok(Some((EVERYONE.to_string(), GENERIC_ALL)));
+        }
+        // SAFETY: a non-null DACL from `GetNamedSecurityInfoW` points at a
+        // valid `ACL` inside the descriptor `self` keeps alive.
+        let count = unsafe { (*self.dacl).AceCount };
+        for index in 0..u32::from(count) {
+            let mut ace: *mut c_void = ptr::null_mut();
+            // SAFETY: `index` is below the list's own count, and `ace`
+            // receives a pointer into the same descriptor.
+            if unsafe { GetAce(self.dacl, index, &mut ace) } == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            // SAFETY: every ACE begins with an `ACE_HEADER`.
+            let header = unsafe { &*ace.cast::<ACE_HEADER>() };
+            if u32::from(header.AceFlags) & INHERIT_ONLY_ACE != 0 {
+                continue;
+            }
+            let kind = u32::from(header.AceType);
+            if kind == ACCESS_ALLOWED_ACE_TYPE || kind == ACCESS_ALLOWED_CALLBACK_ACE_TYPE {
+                // SAFETY: both types lay out `Mask` and then the SID directly
+                // after the header, which is `ACCESS_ALLOWED_ACE`'s layout;
+                // the callback type's application data follows the SID and
+                // is not read.
+                let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
+                if allowed.Mask & WRITE_RIGHTS == 0 {
+                    continue;
+                }
+                let sid: PSID = (&raw const allowed.SidStart).cast_mut().cast();
+                let trustee = sid_string(sid)?;
+                if !accepted(&trustee, user) {
+                    return Ok(Some((trustee, allowed.Mask)));
+                }
+            } else if [
+                ACCESS_DENIED_ACE_TYPE,
+                ACCESS_DENIED_CALLBACK_ACE_TYPE,
+                ACCESS_DENIED_OBJECT_ACE_TYPE,
+                ACCESS_DENIED_CALLBACK_OBJECT_ACE_TYPE,
+            ]
+            .contains(&kind)
+            {
+                continue;
+            } else {
+                return Err(io::ErrorKind::Unsupported.into());
+            }
+        }
+        Ok(None)
+    }
+}
+
+/// Whether a created directory's list reaches what is created inside it.
+enum Inherit {
+    Children,
+    Nothing,
+}
+
+/// A self-relative security descriptor granting this user full control and
+/// nobody else anything, protected from inheritance.
+struct Private(Local);
+
+impl Private {
+    /// Built from SDDL, because the string is the one form of an access list
+    /// a reader can check by eye: `D:P` is a protected DACL, `A` an allow
+    /// entry, `FA` full file access, `OICI` inherited by files and
+    /// directories created inside, and the last field this user's SID.
+    fn descriptor(inherit: Inherit) -> io::Result<Private> {
+        let user = current_user()?;
+        let flags = match inherit {
+            Inherit::Children => "OICI",
+            Inherit::Nothing => "",
+        };
+        let sddl: Vec<u16> = format!("D:P(A;{flags};FA;;;{user})")
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: `sddl` is NUL-terminated and outlives the call; the size
+        // output is optional and null; `descriptor` receives a `LocalAlloc`ed
+        // descriptor this function then owns.
+        let ok = unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                SDDL_REVISION_1,
+                &mut descriptor,
+                ptr::null_mut(),
+            )
+        };
+        let owned = Local(descriptor);
+        if ok == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(Private(owned))
+    }
+
+    /// The attributes a create call takes.
+    ///
+    /// The value holds a raw pointer into `self` and no lifetime ties the two,
+    /// so the type does not stop it outliving the descriptor. Both callers
+    /// build it on the line after the descriptor and pass it to a call on the
+    /// line after that, with the descriptor still in scope; that adjacency is
+    /// the whole guarantee, and it is why this is private to the file.
+    fn attributes(&self) -> SECURITY_ATTRIBUTES {
+        SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: self.0 .0,
+            bInheritHandle: 0,
+        }
+    }
+}

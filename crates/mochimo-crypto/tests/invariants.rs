@@ -6319,6 +6319,14 @@ const DECLARED_UNRESOLVED_SRC_NAMES: &[(&str, &str)] = &[
          is load-bearing: it is what makes every `unsafe` block inside an `unsafe fn` state its \
          own SAFETY.",
     ),
+    (
+        "from_raw_os_error",
+        "a `std::io::Error` constructor, called in `keystore/perms/windows.rs` to carry the \
+         status `GetNamedSecurityInfoW` returns, which is an error code and not a flag in \
+         `GetLastError`. Dependency surface: nothing in this tree defines it. A rename in `std` \
+         is a compile error -- but only in a Windows build, since the file compiles nowhere \
+         else, so on a Unix host this row is the one thing that notices the name at all.",
+    ),
 ];
 
 /// Every four-plus-word `snake_case` name cited in `crates/*/src/` names an
@@ -9585,10 +9593,11 @@ fn panicking_constructs_are_declared_at_their_sites() {
 /// here: the binding itself, the `TXENTRY` handle in `tx.rs`, the diagnostic
 /// strings in `error.rs`, `word16_max`'s shim call in `lib.rs`, and the two
 /// class-routed calls in `addr.rs` and `base58.rs`. Every one of those sites
-/// went with the C, so the list is empty and the check is an absence
-/// check: any `unsafe` keyword under `src/` is a red naming the file. It
-/// keeps its file floor so an empty walk cannot pass, and its positive
-/// control is the fault-injection row that puts one `unsafe {}` back.
+/// went with the C. What the list holds is the Windows boundary -- files
+/// compiled only on Windows, each argued at its row -- so any `unsafe`
+/// keyword anywhere else under `src/` is a red naming the file. It keeps its
+/// file floor so an empty walk cannot pass, and its positive control is the
+/// fault-injection row that puts one `unsafe {}` back.
 ///
 /// The native half is the one with consequences: `miri.rs` establishes memory
 /// safety **for the native paths Miri walks**, and an `unsafe` block appearing
@@ -9601,11 +9610,25 @@ fn panicking_constructs_are_declared_at_their_sites() {
 /// subject itself.
 #[test]
 fn unsafe_is_confined_to_declared_files() {
-    // Empty: every row it held named a site the foreign-function backend
-    // brought, and every one went with it. A row added here needs the
-    // argument its predecessors carried: which boundary, and why Miri cannot
-    // walk it.
-    const ALLOWED: [(&str, &str); 0] = [];
+    // Every row the foreign-function backend brought went with it. A row
+    // added here needs the argument its predecessors carried: which boundary,
+    // and why Miri cannot walk it.
+    //
+    // The row below is the Windows permission model, and it is a permanent
+    // delta of the tree that runs on Windows, recorded in `FORK.md`'s table.
+    // The boundary is Win32's security API, which `std` does not wrap: `std`
+    // neither reads a security descriptor nor creates a file under one, so
+    // the access-list check and the owner-only creation are foreign calls or
+    // they are nothing. Miri cannot walk them -- it interprets Rust, and a
+    // foreign call is the edge of what it can see -- and the Miri run is on a
+    // Unix host, where the file is not compiled at all. So a green Miri run
+    // says nothing about this file in either direction, and the file's own
+    // head says what does establish it: at present, a compile and clippy for
+    // the Windows target, and nothing that has run.
+    const ALLOWED: [(&str, &str); 1] = [(
+        "crates/mochimo-crypto/src/keystore/perms/windows.rs",
+        "the Windows permission model's Win32 security calls",
+    )];
 
     fn count_unsafe(stream: proc_macro2::TokenStream, lines: &mut Vec<usize>) {
         for tree in stream {
