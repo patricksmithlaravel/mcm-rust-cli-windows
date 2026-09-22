@@ -260,12 +260,25 @@ chacha20poly1305 = { version = "0.10", default-features = false, optional = true
 #   check dispatches on.
 # * `Win32_System_Threading` -- `OpenProcessToken` and `GetCurrentProcess`, to
 #   ask whose process this is.
+# * `Win32_System_Console` -- the binary's console: the mode that turns echo
+#   off, and the wide read and write, which is what keeps a password's bytes
+#   its UTF-8 on every platform rather than the console's code page.
+# * `Win32_Security_Cryptography` -- `BCryptGenRandom`, the binary's entropy,
+#   in place of `/dev/urandom`. `ring`'s generator is in the binary's graph
+#   under `mesh-https` and is not used, for the reason `os_bytes` gives on
+#   Unix: the entropy is the operating system's, drawn by this program.
+#
+# The two binary-only features are in the library's dependency line because a
+# `[[bin]]` has no dependency table of its own. The library does not import
+# either module.
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
     "Win32_Storage_FileSystem",
+    "Win32_System_Console",
     "Win32_System_SystemServices",
     "Win32_System_Threading",
 ] }

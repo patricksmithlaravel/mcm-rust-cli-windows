@@ -75,7 +75,10 @@
 //!
 //! **Read from `/dev/tty`, not stdin**, so that a pipe or a redirect cannot
 //! supply the seed silently — the point of choosing a prompt is that the seed
-//! never comes from something that can be recorded.
+//! never comes from something that can be recorded. On Windows the device is
+//! the console's own buffers, `CONIN$` and `CONOUT$`, opened by name for the
+//! same reason; the `console` module at the foot of this file is that arm,
+//! and [`TERMINAL`] is the one place either is named in a message.
 //!
 //! **The cost, accepted rather than overlooked:** not scriptable. `balance`
 //! prompts, because `Wallet::open` refuses a derived account with no master —
@@ -146,6 +149,25 @@ const END_OF_INPUT: &str =
     "end of input at the prompt: the terminal reported end-of-file (Ctrl-D) before a line was \
      typed, so nothing was read and nothing was compared. Type the answer and press Enter, or \
      run the command again.";
+
+/// The device secrets are read from, as every message about it names it.
+///
+/// One constant rather than the path spelled in each message, because the
+/// `Terminal` impl below serves both platforms: a message there that named
+/// `/dev/tty` would name, on Windows, a device the program never opened.
+#[cfg(unix)]
+const TERMINAL: &str = "/dev/tty";
+/// The device secrets are read from, as every message about it names it.
+#[cfg(windows)]
+const TERMINAL: &str = "the console (CONIN$ and CONOUT$)";
+
+/// What a [`Tty`] reads and writes through: the terminal device by path on
+/// Unix, the console's two buffers on Windows. Both are `Read`, `Write` and
+/// `try_clone`, which is all the `Terminal` impl asks of it.
+#[cfg(unix)]
+type Device = std::fs::File;
+#[cfg(windows)]
+type Device = console::Console;
 
 fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
@@ -348,8 +370,10 @@ fn read_secret_line(prompt: &str) -> Result<Zeroizing<String>, String> {
 /// terminal silent. Done by `stty` rather than a `termios` dependency — the
 /// only place the binary needs it, and a crate for one call is the shape
 /// declined for `tempfile`.
+#[cfg(unix)]
 struct EchoGuard(std::fs::File);
 
+#[cfg(unix)]
 fn echo_off(tty: &std::fs::File) -> Result<EchoGuard, String> {
     let dup = tty
         .try_clone()
@@ -371,6 +395,7 @@ fn echo_off(tty: &std::fs::File) -> Result<EchoGuard, String> {
     Ok(EchoGuard(dup))
 }
 
+#[cfg(unix)]
 impl EchoGuard {
     /// Turn echo back on **and say whether it worked**.
     ///
@@ -408,6 +433,7 @@ impl EchoGuard {
     }
 }
 
+#[cfg(unix)]
 impl Drop for EchoGuard {
     fn drop(&mut self) {
         let _ = self.restore();
@@ -423,17 +449,18 @@ impl Drop for EchoGuard {
 /// generator is not reachable either.
 ///
 /// Opening a device by path is a platform decision and not an incidental
-/// convenience: this wallet targets Unix, `lib.rs` says so at compile time,
-/// and the same binary reads secrets from `/dev/tty` by path for the same
-/// reason. This is the operating system's generator rather than a hand-rolled
-/// one, and every way it can fail is loud -- `File::open` errors and a short
-/// `read_exact` errors -- so a weak draw is never returned in place of a
-/// strong one.
+/// convenience: this is the Unix arm, `lib.rs` states the platforms, and the
+/// same arm reads secrets from `/dev/tty` by path for the same reason. The
+/// Windows arm is `console::os_bytes`. This is the operating system's
+/// generator rather than a hand-rolled one, and every way it can fail is loud
+/// -- `File::open` errors and a short `read_exact` errors -- so a weak draw is
+/// never returned in place of a strong one.
 ///
 /// **Generic over the width**, because the store now needs three
 /// separate draws rather than one: the phrase entropy, the KDF salt and the
 /// per-open nonce seed. They are separate draws and not one split three ways --
 /// see `cli::create::CreateEntropy`.
+#[cfg(unix)]
 fn os_bytes<const N: usize>() -> Result<Zeroizing<[u8; N]>, String> {
     use std::io::Read;
     let mut buf = Zeroizing::new([0u8; N]);
@@ -475,7 +502,7 @@ fn run_create(dir: &str, from_phrase: bool) -> cli::Report {
 /// terminal that is both present and silent. The guard carries its own
 /// duplicated descriptor, so field drop order here is not load-bearing.
 struct Tty {
-    file: std::fs::File,
+    file: Device,
     _echo: EchoGuard,
 }
 
@@ -491,6 +518,7 @@ struct Tty {
 /// [`acquire_terminal`] and every other command through [`read_secret_line`],
 /// and both are this function, so there is no second open for the next
 /// read-only `File::open` to hide in.
+#[cfg(unix)]
 fn open_terminal() -> Result<Tty, String> {
     let file = std::fs::OpenOptions::new()
         .read(true)
@@ -553,11 +581,11 @@ impl create_cmd::Terminal for Tty {
         let mut out = self
             .file
             .try_clone()
-            .map_err(|e| format!("cannot write to /dev/tty: {e}"))?;
+            .map_err(|e| format!("cannot write to {TERMINAL}: {e}"))?;
         out.write_all(text.as_bytes())
             .and_then(|()| out.write_all(b"\n"))
             .and_then(|()| out.flush())
-            .map_err(|e| format!("cannot write to /dev/tty: {e}"))
+            .map_err(|e| format!("cannot write to {TERMINAL}: {e}"))
     }
 
     /// The confirmation, **visible** — see the trait method's note for why
@@ -583,23 +611,23 @@ impl create_cmd::Terminal for Tty {
         drop(_echo);
         let mut term = file
             .try_clone()
-            .map_err(|e| format!("cannot write to /dev/tty: {e}"))?;
+            .map_err(|e| format!("cannot write to {TERMINAL}: {e}"))?;
         // The prompt's write is checked: a question that could not be
         // asked is a precondition failure of a method whose contract is that
         // the operator answers it, not a detail to read past.
         term.write_all(prompt.as_bytes())
             .and_then(|()| term.flush())
-            .map_err(|e| format!("cannot write to /dev/tty: {e}"))?;
+            .map_err(|e| format!("cannot write to {TERMINAL}: {e}"))?;
         let mut line = Zeroizing::new(String::with_capacity(PHRASE_CAPACITY));
         let read = BufReader::new(
             file.try_clone()
-                .map_err(|e| format!("cannot read /dev/tty: {e}"))?,
+                .map_err(|e| format!("cannot read {TERMINAL}: {e}"))?,
         )
         .read_line(&mut line);
         match read {
             Ok(0) => return Err(END_OF_INPUT.into()),
             Ok(_) => {}
-            Err(e) => return Err(format!("cannot read from /dev/tty: {e}")),
+            Err(e) => return Err(format!("cannot read from {TERMINAL}: {e}")),
         }
         Ok(Zeroizing::new(line.trim().to_string()))
     }
@@ -614,18 +642,18 @@ impl create_cmd::Terminal for Tty {
         let mut term = self
             .file
             .try_clone()
-            .map_err(|e| format!("cannot write to /dev/tty: {e}"))?;
+            .map_err(|e| format!("cannot write to {TERMINAL}: {e}"))?;
         // Checked, as in `read_visible_line`. A password prompt that
         // never appeared reads a password typed blind, or waits forever on
         // an operator who was never asked.
         term.write_all(prompt.as_bytes())
             .and_then(|()| term.flush())
-            .map_err(|e| format!("cannot write to /dev/tty: {e}"))?;
+            .map_err(|e| format!("cannot write to {TERMINAL}: {e}"))?;
         let mut line = Zeroizing::new(String::with_capacity(PHRASE_CAPACITY));
         let read = BufReader::new(
             self.file
                 .try_clone()
-                .map_err(|e| format!("cannot read /dev/tty: {e}"))?,
+                .map_err(|e| format!("cannot read {TERMINAL}: {e}"))?,
         )
         .read_line(&mut line);
         // The newline after an echo-off read is cosmetic -- the operator's
@@ -635,8 +663,290 @@ impl create_cmd::Terminal for Tty {
         match read {
             Ok(0) => return Err(END_OF_INPUT.into()),
             Ok(_) => {}
-            Err(e) => return Err(format!("cannot read from /dev/tty: {e}")),
+            Err(e) => return Err(format!("cannot read from {TERMINAL}: {e}")),
         }
         Ok(Zeroizing::new(line.trim().to_string()))
+    }
+}
+
+#[cfg(windows)]
+use console::{open_terminal, os_bytes, EchoGuard};
+
+/// The Windows console, in place of `/dev/tty`, `stty` and `/dev/urandom`.
+///
+/// **What stands in for what.** The device is the console's own input buffer
+/// and active screen buffer, opened by name as `CONIN$` and `CONOUT$` -- the
+/// Windows form of opening `/dev/tty` by path, and for the same reason:
+/// neither is a standard stream, so a pipe or a redirect of stdin, stdout or
+/// stderr supplies nothing and captures nothing. Echo is the input buffer's
+/// `ENABLE_ECHO_INPUT` mode bit rather than `stty`. The generator is
+/// `BCryptGenRandom` with the system-preferred provider, the documented
+/// interface to the one Windows generator, rather than `/dev/urandom`.
+///
+/// **Why the reads and writes are `ReadConsoleW` and `WriteConsoleW`**, and
+/// not `std::fs::File` over the same handles. `ReadFile` on a console returns
+/// bytes in the console's input code page, so a password containing one
+/// non-ASCII character would be different bytes on Windows than on Linux for
+/// the same keystrokes -- and a store sealed on one would refuse the "same"
+/// password on the other. The wide calls deliver UTF-16, which is transcoded
+/// here, so a password's bytes are its UTF-8 on all three platforms. Output
+/// goes the same way for the same reason in the other direction.
+///
+/// `Console` implements `Read` and `Write`, which is what lets the
+/// `Terminal` impl above serve both platforms unchanged: its ordering -- the
+/// refusal before the read, the checked restore before the visible prompt,
+/// end of input refused as such -- is written once, and a fix to it reaches
+/// Windows in the same commit it reaches Unix.
+///
+/// # What is not established
+///
+/// **None of this has run.** It compiles and passes clippy for
+/// `x86_64-pc-windows-msvc` from a macOS host, and nothing here has executed
+/// on Windows. `tests/cli.rs`'s pseudo-terminal harness is what establishes
+/// the Unix arm's prompts, and it has no Windows counterpart. Three things in
+/// particular are read from documentation and not measured:
+///
+/// * Under a terminal that is not a Windows console and hosts no
+///   pseudo-console -- `mintty` without `winpty` -- `CONIN$` may open a
+///   console nobody can see, and the prompt would wait for input nobody can
+///   type. Windows Terminal, the classic console host and editors that host a
+///   pseudo-console are the case this is written for.
+/// * `Ctrl-C` at a prompt ends the process through the default control
+///   handler, which runs no destructor, so echo stays off in that console.
+///   That is the Unix arm's `SIGINT` gap in another shape, and the README's
+///   limits already carry it for signals.
+/// * The console mode belongs to the console's input buffer, which the
+///   parent shell shares. Restoring it is the guard's job on every path that
+///   unwinds, and it is checked where a visible answer depends on it.
+#[cfg(windows)]
+mod console {
+    use std::fs::File;
+    use std::io::{self, Read, Write};
+    use std::os::windows::io::AsRawHandle;
+    use std::ptr;
+
+    use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+    use windows_sys::Win32::System::Console::{
+        GetConsoleMode, ReadConsoleW, SetConsoleMode, WriteConsoleW, ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT,
+    };
+    use zeroize::Zeroizing;
+
+    use super::Tty;
+
+    /// The most UTF-16 units asked of one `ReadConsoleW`. A line longer than
+    /// this arrives over several reads, which `BufReader::read_line` joins.
+    const READ_UNITS: usize = 4096;
+
+    /// What a line beginning with `Ctrl-Z` means at a Windows console: end of
+    /// input, as `std`'s own console reader treats it. It reaches the shared
+    /// code as a zero-byte read, which is refused as `END_OF_INPUT`.
+    const CTRL_Z: u16 = 0x1A;
+
+    /// The console's input buffer and active screen buffer.
+    pub(super) struct Console {
+        input: File,
+        output: File,
+    }
+
+    impl Console {
+        pub(super) fn try_clone(&self) -> io::Result<Console> {
+            Ok(Console {
+                input: self.input.try_clone()?,
+                output: self.output.try_clone()?,
+            })
+        }
+
+        fn read_units(&self, out: &mut [u16]) -> io::Result<usize> {
+            let len = u32::try_from(out.len()).map_err(|_| io::Error::from(io::ErrorKind::InvalidInput))?;
+            let mut read = 0u32;
+            // SAFETY: `out` is `len` writable UTF-16 units, `read` is a valid
+            // place for the count, and the input-control argument is
+            // optional and null. The handle is `CONIN$`, which `input` owns.
+            let ok = unsafe {
+                ReadConsoleW(self.input.as_raw_handle(), out.as_mut_ptr().cast(), len, &mut read, ptr::null())
+            };
+            if ok == 0 {
+                return Err(io::Error::last_os_error());
+            }
+            Ok(read as usize)
+        }
+    }
+
+    impl Read for Console {
+        /// One `ReadConsoleW`, transcoded to UTF-8 into `buf`.
+        ///
+        /// At most a third of `buf.len()` units are asked for, because one
+        /// UTF-16 unit is at most three UTF-8 bytes and a surrogate pair is
+        /// four bytes from two units, so the transcoding always fits and no
+        /// typed byte has to be held here between calls. A read that ends on
+        /// a high surrogate is completed by one more unit, which the same
+        /// bound has room for, so a pair is never split across two reads.
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            let want = (buf.len() / 3).min(READ_UNITS);
+            if want < 2 {
+                return Err(io::ErrorKind::InvalidInput.into());
+            }
+            let mut units = Zeroizing::new(vec![0u16; want]);
+            let mut n = self.read_units(&mut units[..want - 1])?;
+            if n > 0 && (0xD800..0xDC00).contains(&units[n - 1]) {
+                n += self.read_units(&mut units[n..n + 1])?;
+            }
+            if units[..n].first() == Some(&CTRL_Z) {
+                return Ok(0);
+            }
+            let mut written = 0;
+            for c in char::decode_utf16(units[..n].iter().copied()) {
+                let c = c.map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+                written += c.encode_utf8(&mut buf[written..]).len();
+            }
+            Ok(written)
+        }
+    }
+
+    impl Write for Console {
+        /// All of `buf`, as UTF-16, or an error.
+        ///
+        /// `buf` must be whole UTF-8: every caller writes a `&str`'s bytes in
+        /// one call, and a slice that splits a character is refused as
+        /// `InvalidData` rather than written as a replacement character. The
+        /// wide copy is zeroized, because the phrase passes through here, and
+        /// its capacity is reserved before it is filled -- a string never has
+        /// more UTF-16 units than UTF-8 bytes -- so it never grows and never
+        /// leaves a copy behind, the reason `PHRASE_CAPACITY` exists.
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            let text = std::str::from_utf8(buf).map_err(|_| io::Error::from(io::ErrorKind::InvalidData))?;
+            let mut units: Zeroizing<Vec<u16>> = Zeroizing::new(Vec::with_capacity(text.len()));
+            units.extend(text.encode_utf16());
+            let mut done = 0;
+            while done < units.len() {
+                let rest = &units[done..];
+                let len = u32::try_from(rest.len()).unwrap_or(u32::MAX);
+                let mut wrote = 0u32;
+                // SAFETY: `rest` holds at least `len` readable units, `wrote`
+                // is a valid place for the count, and the reserved argument
+                // is null as documented. The handle is `CONOUT$`, which
+                // `output` owns.
+                let ok = unsafe {
+                    WriteConsoleW(self.output.as_raw_handle(), rest.as_ptr(), len, &mut wrote, ptr::null())
+                };
+                if ok == 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                if wrote == 0 {
+                    return Err(io::ErrorKind::WriteZero.into());
+                }
+                done += wrote as usize;
+            }
+            Ok(buf.len())
+        }
+
+        /// `WriteConsoleW` is unbuffered, so there is nothing to flush.
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// The console's echo, off for as long as the guard lives. The Windows
+    /// arm of the Unix `EchoGuard`, with the same two directions: turning echo
+    /// off is refused on failure, and restoring it is checked by the one
+    /// caller whose answer must be visible.
+    pub(super) struct EchoGuard {
+        input: File,
+        mode: u32,
+    }
+
+    /// Turn echo off, keeping line input on.
+    ///
+    /// **Line input is set, not just kept.** The console needs it for echo to
+    /// be off at all, and it is what gives the operator backspace while
+    /// typing blind -- the Unix terminal's canonical mode. The mode found is
+    /// what the guard restores, whatever it was.
+    pub(super) fn echo_off(console: &Console) -> Result<EchoGuard, String> {
+        let input = console
+            .input
+            .try_clone()
+            .map_err(|e| format!("cannot duplicate the console input handle: {e}"))?;
+        let handle = input.as_raw_handle();
+        let mut mode = 0u32;
+        // SAFETY: `handle` is the `CONIN$` handle `input` owns, and `mode` is
+        // a valid place for the mode.
+        let found = unsafe { GetConsoleMode(handle, &mut mode) } != 0;
+        // SAFETY: the same handle, and a mode derived from the one it reported.
+        let set = found && unsafe { SetConsoleMode(handle, (mode | ENABLE_LINE_INPUT) & !ENABLE_ECHO_INPUT) } != 0;
+        if !set {
+            return Err(
+                "refusing to read a secret with terminal echo on: the words would be visible and \
+                 may be kept in the terminal's scrollback. Nothing was read."
+                    .into(),
+            );
+        }
+        Ok(EchoGuard { input, mode })
+    }
+
+    impl EchoGuard {
+        /// Put back the mode found **and say whether it worked**; the Unix
+        /// arm's note on `restore` is the argument for checking it.
+        pub(super) fn restore(&self) -> Result<(), String> {
+            // SAFETY: the `CONIN$` handle `input` owns, and the mode the
+            // console itself reported for it.
+            if unsafe { SetConsoleMode(self.input.as_raw_handle(), self.mode) } == 0 {
+                return Err(
+                    "cannot turn console echo back on, so the confirmation would be typed blind. \
+                     That is how the words get mistyped. Nothing further was read; close this \
+                     console window and open another to restore it."
+                        .into(),
+                );
+            }
+            Ok(())
+        }
+    }
+
+    impl Drop for EchoGuard {
+        fn drop(&mut self) {
+            let _ = self.restore();
+        }
+    }
+
+    /// The console, with echo already off. The Windows arm of
+    /// `open_terminal`, and like it the one place the device is opened.
+    ///
+    /// Read AND write on both names: `SetConsoleMode` needs the input buffer
+    /// opened for both, and `GetConsoleMode` on the screen buffer does too.
+    /// `std` passes a name this short to `CreateFileW` unchanged, which is
+    /// what makes the two device names reachable through `OpenOptions` --
+    /// read in `std`'s Windows path source, not run.
+    pub(super) fn open_terminal() -> Result<Tty, String> {
+        let open = |name: &str| {
+            std::fs::OpenOptions::new().read(true).write(true).open(name).map_err(|e| {
+                format!(
+                    "cannot open {name}: {e}. This program reads secrets from the console it runs \
+                     in and there is none here -- it cannot be driven from a pipe, a scheduled \
+                     task or a harness without one."
+                )
+            })
+        };
+        let file = Console {
+            input: open("CONIN$")?,
+            output: open("CONOUT$")?,
+        };
+        let _echo = echo_off(&file)?;
+        Ok(Tty { file, _echo })
+    }
+
+    /// `N` bytes from the system generator: the Windows arm of `os_bytes`.
+    ///
+    /// Every way it can fail is loud, as on Unix: a draw too wide for one call
+    /// is refused before the call, and a non-zero status is an error, so a
+    /// weak draw is never returned in place of a strong one.
+    pub(super) fn os_bytes<const N: usize>() -> Result<Zeroizing<[u8; N]>, String> {
+        let mut buf = Zeroizing::new([0u8; N]);
+        let len = u32::try_from(N).map_err(|_| format!("a {N}-byte draw does not fit one BCryptGenRandom call"))?;
+        // SAFETY: a null algorithm handle with the system-preferred flag is
+        // the documented form of the call, and `buf` is `len` writable bytes.
+        let status = unsafe { BCryptGenRandom(ptr::null_mut(), buf.as_mut_ptr(), len, BCRYPT_USE_SYSTEM_PREFERRED_RNG) };
+        if status != 0 {
+            return Err(format!("the system random generator failed (BCryptGenRandom, NTSTATUS {status:#010x})"));
+        }
+        Ok(buf)
     }
 }

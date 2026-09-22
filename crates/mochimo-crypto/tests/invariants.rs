@@ -9614,7 +9614,7 @@ fn unsafe_is_confined_to_declared_files() {
     // added here needs the argument its predecessors carried: which boundary,
     // and why Miri cannot walk it.
     //
-    // The row below is the Windows permission model, and it is a permanent
+    // The first row is the Windows permission model, and it is a permanent
     // delta of the tree that runs on Windows, recorded in `FORK.md`'s table.
     // The boundary is Win32's security API, which `std` does not wrap: `std`
     // neither reads a security descriptor nor creates a file under one, so
@@ -9625,10 +9625,24 @@ fn unsafe_is_confined_to_declared_files() {
     // says nothing about this file in either direction, and the file's own
     // head says what does establish it: at present, a compile and clippy for
     // the Windows target, and nothing that has run.
-    const ALLOWED: [(&str, &str); 1] = [(
-        "crates/mochimo-crypto/src/keystore/perms/windows.rs",
-        "the Windows permission model's Win32 security calls",
-    )];
+    //
+    // The second row is the binary's Windows console, on the same two
+    // grounds. `std` offers no console mode, so echo cannot be turned off
+    // without `SetConsoleMode`; it reads a console only through its own
+    // global stdin, whose buffer lives as long as the process and is not
+    // this program's to zeroize; and it has no interface to the system
+    // generator. The `unsafe` sits in one `cfg(windows)` module at the foot of
+    // the file, and the Unix arm above it holds none.
+    const ALLOWED: [(&str, &str); 2] = [
+        (
+            "crates/mochimo-crypto/src/keystore/perms/windows.rs",
+            "the Windows permission model's Win32 security calls",
+        ),
+        (
+            "crates/mochimo-crypto/src/bin/mcm-wallet.rs",
+            "the binary's Windows console and generator, in its `console` module",
+        ),
+    ];
 
     fn count_unsafe(stream: proc_macro2::TokenStream, lines: &mut Vec<usize>) {
         for tree in stream {

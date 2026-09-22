@@ -176,6 +176,20 @@ pub(crate) fn refuse_unsafe_dir(dir: &Path) -> Result<()> {
         op: "read the directory's access list",
         kind: e.kind(),
     })?;
+    // The list before the owner. A volume with no access control -- FAT and
+    // exFAT -- reports a null list and may report no owner, and the refusal
+    // an operator can act on is "anyone can write here", not a failure to
+    // read an owner that volume does not keep.
+    match security.foreign_writer(&user) {
+        Ok(None) => {}
+        Ok(Some((trustee, rights))) => return Err(Error::UnsafeAcl { trustee, rights }),
+        Err(e) => {
+            return Err(Error::Io {
+                op: "read the directory's access list",
+                kind: e.kind(),
+            })
+        }
+    }
     let owner = sid_string(security.owner).map_err(|e| Error::Io {
         op: "read the directory's owner",
         kind: e.kind(),
@@ -186,14 +200,7 @@ pub(crate) fn refuse_unsafe_dir(dir: &Path) -> Result<()> {
             rights: WRITE_DAC | READ_CONTROL,
         });
     }
-    match security.foreign_writer(&user) {
-        Ok(None) => Ok(()),
-        Ok(Some((trustee, rights))) => Err(Error::UnsafeAcl { trustee, rights }),
-        Err(e) => Err(Error::Io {
-            op: "read the directory's access list",
-            kind: e.kind(),
-        }),
-    }
+    Ok(())
 }
 
 /// Create the store directory under a protected list granting this user

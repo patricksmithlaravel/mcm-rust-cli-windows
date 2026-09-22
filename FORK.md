@@ -216,7 +216,7 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | `keystore/perms/windows.rs` | the Windows permission model, a new file | it is the Windows arm; a separate file so `perms.rs` stays the Unix arm and upstream edits to it merge without meeting Windows code |
 | `error.rs` | `UnsafeAcl` and `ReplaceRefused`, both `cfg(windows)` | the evidence a Windows refusal carries has no Unix shape, and `UnsafePermissions`' `mode` would have to be invented to carry it |
 | `crates/mochimo-crypto/Cargo.toml` | `windows-sys`, a `cfg(windows)` dependency | the declarations the two Windows arms call |
-| `tests/invariants.rs` | the first row in `unsafe_is_confined_to_declared_files`, and `from_raw_os_error` in the declared unresolved names | the Win32 security API has no `std` wrapper, so the permission model is foreign calls or nothing |
+| `tests/invariants.rs` | two rows in `unsafe_is_confined_to_declared_files` -- the permission model and the binary's console -- and `from_raw_os_error` in the declared unresolved names | neither the Win32 security API nor the console mode has a `std` wrapper, so both are foreign calls or nothing |
 
 #### What Rep-1 may not change
 
