@@ -153,7 +153,8 @@
 //! same position. Rename atomicity is relied on for NTFS as for the Unix
 //! filesystems above, and Win32 does not document it either. Kills at a
 //! syscall boundary are covered by the same proofs on both platforms, and
-//! those proofs have run on Unix alone.
+//! those proofs pass on a Windows runner as on Unix; `FORK.md` records the
+//! run.
 
 // The storage guarantees, per platform, which the module's head states in
 // full: the four-step commit and the lock above rest on Unix's rename(2),

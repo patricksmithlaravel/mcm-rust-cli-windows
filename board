@@ -26,8 +26,10 @@
 # defect twice. What a Windows host needs besides Git is Rust through rustup,
 # the MSVC build tools, and -- for the `build: shipped` row and the TLS clippy
 # row, which compile `ring`'s C -- what `ring`'s own build documentation asks
-# for on that target, which on aarch64 Windows is clang. That last part is
-# read from `ring`'s documentation and has not been run.
+# for on that target. On x86_64 the MSVC build tools were all it took,
+# measured on a GitHub Windows runner, where this script ran green under Git
+# Bash; FORK.md records the run. On aarch64 Windows the documentation asks
+# for clang, and that part has not been run.
 #
 # WHERE THE ROWS CAME FROM. Every command below is transcribed from AGENT.md's
 # "Build and test" block, which is where the board is defined. THE TWO COPIES

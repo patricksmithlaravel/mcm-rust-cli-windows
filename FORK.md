@@ -393,7 +393,7 @@ keystore's lock section records the correction about `flock` above, with the
 one residue Microsoft documents: a lock can briefly outlive a terminated
 holder, which is met as `Locked`.
 
-### R1-2 -- the Windows permission model **(done, 2026-09-22; not run)**
+### R1-2 -- the Windows permission model **(done, 2026-09-22; its tests green on a Windows runner, 2026-09-24)**
 
 A second arm in `keystore::perms`: a DACL check where the mode check is, and
 restricted creation where the mode-carrying creation is.
@@ -416,7 +416,7 @@ Note what `perms.rs` records about the public surface: `Error::UnsafePermissions
 carries `mode: u32` and renders it as octal. A second implementation either
 reports a Unix mode it did not measure or changes a public variant.
 
-### R1-3 -- `fsync_dir`, which is the one that matters **(done, 2026-09-22; not run)**
+### R1-3 -- `fsync_dir`, which is the one that matters **(done, 2026-09-22; exercised on a Windows runner, 2026-09-24; power loss unmeasured)**
 
 `medium.rs`'s fourth durable step opens the directory and `sync_all`s it. On
 Windows that **compiles and fails at runtime**: `File::open` on a directory is
@@ -434,7 +434,7 @@ NTFS flushes its log can bring back the previous snapshot, and with it the
 chance to sign a reserved position twice. The README tells a Windows operator
 what to do after a power cut.
 
-### R1-4 -- rename under a sharing violation **(done, 2026-09-22; not run)**
+### R1-4 -- rename under a sharing violation **(done, 2026-09-22; measured on a Windows runner, 2026-09-24)**
 
 `fs::rename` over an existing file maps to a replacing move on Windows, which
 fails while another process holds the target open without delete sharing --
@@ -445,11 +445,15 @@ needs a named error rather than an anonymous `Io`.
 `Error::ReplaceRefused { code }`, for `ERROR_ACCESS_DENIED` and
 `ERROR_SHARING_VIOLATION`. One thing learned in `std`'s source: its Windows
 `rename` retries a refused move with POSIX rename semantics, and returns the
-first error if the retry fails too. Whether that retry replaces a held file is
-not established; the `cfg(windows)` test that holds the snapshot open says in
-its own doc what a red result there would mean.
+first error if the retry fails too. **Measured on a Windows runner** --
+Windows Server 2025, build 26100 -- the retry does not replace a snapshot
+another process holds open sharing read only:
+`a_snapshot_held_open_without_delete_sharing_refuses_the_commit_by_name` is
+green there, so the commit is refused as `ReplaceRefused`, the snapshot is
+unchanged and the handle is poisoned. That is one build of one Windows, and a
+holder that shares delete is not measured.
 
-### R1-5 -- the binary **(done, 2026-09-22; not run)**
+### R1-5 -- the binary **(done, 2026-09-22; built on a Windows runner, never run there)**
 
 `/dev/tty`, `stty` and `/dev/urandom` are the binary's, not the library's --
 the library takes entropy as a parameter and `cli::create::Terminal` is already
@@ -462,7 +466,12 @@ Unix and a `Console` implementing `Read` and `Write` on Windows, so the prompt
 ordering this binary's defects taught is written once and an upstream fix to
 it reaches both platforms.
 
-### R1-6 -- the board **(done, 2026-09-22; not run on Windows)**
+The shipped binary, TLS and all, builds natively on a Windows runner: the
+`build: shipped` and `clippy: mesh-https` rows are green there, `ring`'s C
+compiled by the image's MSVC. Nothing runs it, so the console, its echo
+handling and `BCryptGenRandom` are established by nothing that executes.
+
+### R1-6 -- the board **(done, 2026-09-22; green on all three platforms, 2026-09-24)**
 
 `./board` is a POSIX shell script. `RELEASE.md` asks for green on two platforms
 at one commit; it becomes three.
@@ -479,21 +488,63 @@ and does not say. For the board to be green on Windows at all, the test tree
 had to compile there and its checkouts had to be byte-identical: the mode-bit
 tests and the `pty` module are `cfg(unix)`, the invariant suite's walks name
 files with `/`, and `.gitattributes` asks for LF. `cargo check --all-targets`
-for the Windows target is clean. **No board has run on Windows**; that is the
-next thing to do, and it needs a Windows host or a CI runner.
+for the Windows target is clean.
 
-**The runner, written 2026-09-24 and not yet run.**
-`.github/workflows/board.yml` runs `./board check` on GitHub's Linux, macOS
-and Windows runners at one commit, when a person pushes a branch whose name
-begins `board/`. It gates nothing and writes no record; `RELEASE.md` says what
-it stands in for, and its own head argues the rest -- the clone under the
-user's profile, no actions, `-latest` images, and `check` rather than
-`verify`. Its first run measures two platforms, not one: no board run on Linux
-is on record either, since `RELEASE.md`'s record is empty and `tests/cli.rs`
-marks its util-linux `script(1)` form unmeasured. That also makes its Linux
-and macOS jobs coverage Rep-0 lacks as much as this tree does. If Rep-0 takes
-a workflow of its own, it is made there and flows down, and this file keeps
+**The runner.** `.github/workflows/board.yml` runs `./board check` on GitHub's
+Linux, macOS and Windows runners at one commit, when a person pushes a branch
+whose name begins `board/`, on its own. It gates nothing and writes no record;
+`RELEASE.md` says what it stands in for, and its own head argues the rest --
+the clone under the user's profile, no actions, `-latest` images, `check`
+rather than `verify`, and why the branch is pushed alone. Its Linux and macOS
+jobs are coverage Rep-0 lacks as much as this tree does. If Rep-0 takes a
+workflow of its own, it is made there and flows down, and this file keeps
 only what Windows adds.
+
+**Two runs, 2026-09-24.** Each figure is summed from that job's own seventeen
+result lines, read with `gh run view <run> --job <job> --log`:
+
+| run | commit | Linux | macOS | Windows |
+| --- | --- | --- | --- | --- |
+| 35964912554 | `1ebbcaf` | green, 393 passed | green, 393 passed | seven rows green; `test` red, 371 passed and 4 failed |
+| 35971159465 | `11da718` | green, 393 passed | green, 393 passed | green, 375 passed |
+
+Nothing was ignored on any platform. Windows runs eighteen fewer: the
+`pty::` tests its gate removes. The hosts were Linux 6.17 on x86_64, Darwin
+25.6 on arm64 and Windows 10.0.26100 on x86_64; the images were
+`win25-vs2026` 20260907.229.1 and `macos26` 20260907.0351.1 in both runs,
+while `ubuntu24` moved from 20260907.300.1 to 20260920.314.1 between them --
+the `-latest` trade the workflow's head makes, recorded by the run itself.
+
+The first run's four reds were two findings, both in the test tree and both
+fixed at their sites: three invariant guards demanded `pty::` tests that
+Windows does not build (`11da718`), and the refused-connection test's 500 ms
+timeout lost a race with Windows' slower refusal (`bb67dc4`).
+
+**What the Windows board established.** The library's and the command
+layer's tests pass there, the invariant suite with them. The shipped binary
+builds natively with `mesh-https`. The three `cfg(windows)` keystore tests
+pass: a directory Everyone may modify is refused as `UnsafeAcl` naming
+Everyone, a store made under such a parent inherits nothing from it, and a
+snapshot held open sharing read only refuses the commit as `ReplaceRefused`,
+which answers R1-4's question for this build. The proofs the keystore rests
+its claim about a kill at a syscall boundary on pass there as on Unix. The
+trybuild expectations match byte for byte, and the clone's working tree held
+no CRLF file, which is the first measurement of `.gitattributes` on a Windows
+checkout.
+
+**What it did not.** The binary never runs there, so the console, its echo
+handling and `BCryptGenRandom` are measured by nothing. The runner's account
+is the built-in administrator at High mandatory level, and a directory
+created there is owned by the Administrators group, so the access-list check
+met that owner and never the user's own SID that an unelevated desktop would
+give it. Defender's real-time protection is off on the image, so the holder
+R1-4 names, a scanner, held nothing. Power loss is beyond any board. And
+`verify` -- the Miri run and `cargo deny` -- has not run on Windows, nor has
+the MSRV check `RELEASE.md` asks for on every platform.
+
+**On Linux** the eighteen `pty::` tests pass in both runs through util-linux
+`script(1)`, the form `tests/cli.rs` describes as written from the manual and
+never run. That comment is Rep-0's, and correcting it is a Rep-0 change.
 
 ### R1-7 -- the surface check **(done, 2026-09-22)**
 

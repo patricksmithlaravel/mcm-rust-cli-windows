@@ -50,10 +50,11 @@
 //! it rests on, per platform, beside its own gate.
 //!
 //! **The two columns are not established to the same degree.** The Unix
-//! column is what every board run measures. The Windows column compiles and
-//! passes clippy for `x86_64-pc-windows-msvc`; the tests that would measure it
-//! run on a Windows host, and `RELEASE.md` is where a run is recorded. The
-//! BSDs have all three Unix interfaces and are untested.
+//! column is what every board run measures. Of the Windows column, the first
+//! row is measured by the board on a Windows runner, access-list refusals
+//! included, and `FORK.md` records the run; the other two rows are the
+//! binary's, and nothing runs the binary on Windows. The BSDs have all three
+//! Unix interfaces and are untested.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![deny(unsafe_op_in_unsafe_fn)]

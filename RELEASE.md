@@ -107,8 +107,9 @@ claim true.
 The gates above ask for three platforms, and this tree is developed on one.
 `.github/workflows/board.yml` runs `./board check` on GitHub's Linux, macOS
 and Windows runners at one commit, when a person pushes a branch whose name
-begins `board/` -- or, once the workflow is on the default branch, dispatches
-it. It is a way to reach a platform, and it changes nothing above:
+begins `board/`, on its own -- the workflow's head says why alone -- or, once
+the workflow is on the default branch, dispatches it. `FORK.md` records its
+runs. It is a way to reach a platform, and it changes nothing above:
 
 - **It gates nothing.** No pull request waits on it and no check is required
   of one.
@@ -119,11 +120,12 @@ it. It is a way to reach a platform, and it changes nothing above:
   it when its retention period ends, and the record is what a person copies
   out of it before then.
 - **A runner is not an operator's machine.** GitHub documents its Windows
-  runners as administrators with User Account Control disabled, so the
-  access-list check can meet the Administrators group as the owner of every
-  store the tests create, where an unelevated desktop meets the user. The
-  workflow prints the token, and the owner a new directory gets, beside the
-  board.
+  runners as administrators with User Account Control disabled, and a new
+  directory there is owned by the Administrators group, so the access-list
+  check meets that group as the owner where an unelevated desktop meets the
+  user. Defender's real-time protection is off on the image, so no scanner
+  holds the store. The workflow prints the token, the owner a new directory
+  gets and the scanner's state beside the board.
 
 The workflow's head carries the rest of its argument: why it clones under the
 user's profile rather than into the runner's workspace, why it uses no

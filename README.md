@@ -28,7 +28,7 @@ It is also why an account **fails closed** when its stored index and the Mesh di
 
 ## Requirements
 
-- **Linux, macOS and Windows** — built and tested on **Linux** and **macOS**. **The Windows build compiles and has not yet been run**: nobody has executed it, and [`RELEASE.md`](RELEASE.md) is where the first run will be recorded. On Windows the keystore's permission checks are access lists rather than mode bits, secrets are read from the console rather than `/dev/tty`, and a store is **not protected against power loss the way it is on Linux and macOS** — see *Limits*. The BSDs have the Unix interfaces and are untested here.
+- **Linux, macOS and Windows** — built and tested on **Linux** and **macOS**. **On Windows the test suite passes and the program itself has not been run**: the library's and the command layer's tests are green on a Windows runner, which [`FORK.md`](FORK.md) records, and nobody has run `mcm-wallet` at a Windows console, so its prompts and its random number generator there are measured by nothing. On Windows the keystore's permission checks are access lists rather than mode bits, secrets are read from the console rather than `/dev/tty`, and a store is **not protected against power loss the way it is on Linux and macOS** — see *Limits*. The BSDs have the Unix interfaces and are untested here.
 - Rust **1.89+** (see root `Cargo.toml`)
 - A normal controlling terminal — the password and the recovery phrase are read from `/dev/tty` (on Windows, the console the program runs in), never from a pipe or a redirect
 - Network access for any command that talks to a Mesh node

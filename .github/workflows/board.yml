@@ -1,14 +1,12 @@
 # The board, on the hosts this repository's development machine is not.
 #
 # RELEASE.md asks for a green board on Linux, macOS and Windows at the commit
-# being tagged, and this tree is developed on one macOS host. Nothing has run
-# on Windows, and no board run on Linux is on record either: RELEASE.md's
-# record is empty, and `tests/cli.rs` marks its util-linux `script(1)` form
-# unmeasured.
-# This workflow rents the two missing hosts, and the third so that all three
+# being tagged, and this tree is developed on one macOS host. This workflow
+# rents the two platforms that host is not, and the third so that all three
 # run the same commit on the same day. Each runs `./board check` -- the script
 # unchanged, from the shell RELEASE.md names for its platform -- and the job's
-# status is the board's.
+# status is the board's. FORK.md, under R1-6, records what its runs have
+# established and what they have not.
 #
 # IT GATES NOTHING, AND IT RUNS ONLY WHEN A PERSON ASKS. RELEASE.md calls itself
 # the manual replacement for automated verification, and this does not replace
@@ -20,6 +18,13 @@
 # run leaves is a log. A person reads it and writes down what it says; GitHub
 # deletes the log when its retention period ends, which is one more reason the
 # record is kept in RELEASE.md and not here.
+#
+# PUSH THE `board/` BRANCH ON ITS OWN. Measured on this repository: one
+# `git push` that moved `phase-1` and created `board/phase-1` together started
+# nothing -- no run, no check suite -- while each push of a `board/` branch by
+# itself, whether it created the branch or moved it, started a run within
+# seconds. Why the combined push started nothing is not established; that
+# pushing the branch alone works is.
 #
 # `check`, NOT `verify`. `verify` adds `cargo deny check` and the Miri run,
 # which AGENT.md puts at hours rather than minutes. A hosted job is stopped
@@ -38,14 +43,13 @@
 #
 # WHAT A GREEN RUN DOES NOT SAY. Everything RELEASE.md says a green Windows
 # board does not say, and one thing more. GitHub documents its Windows runners
-# as administrators with User Account Control disabled, and on Windows Server,
-# which they run, what an elevated administrator creates is owned by the
-# Administrators group unless a policy says otherwise -- so on a runner the
-# access-list check can meet that group as the owner, where on an operator's
-# unelevated desktop it meets the user. The check accepts both, and a runner
-# measures one of them. The step before the board prints the token and the
-# owner a directory created there actually gets, so a reader can tell which a
-# result is about.
+# as administrators with User Account Control disabled, and the step before
+# the board shows what that means here: the built-in administrator, at High
+# mandatory level, and a new directory owned by the Administrators group. So
+# on a runner the access-list check meets that group as the owner, where on an
+# operator's unelevated desktop it meets the user. The check accepts both, and
+# a runner measures one of them. The step prints the token and the owner on
+# every run, so a reader can tell which a result is about.
 
 name: board
 

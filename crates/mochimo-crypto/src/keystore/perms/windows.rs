@@ -88,13 +88,23 @@
 //! Rust and cannot interpret a foreign call, walks none of it -- nor could it,
 //! since the Miri run is on a Unix host where this file is not compiled.
 //!
-//! # What is not established
+//! # What has run, and what is not established
 //!
-//! **None of this has run.** It compiles and passes clippy for
-//! `x86_64-pc-windows-msvc`, from a macOS host; it has not executed on
-//! Windows. Every claim above about what Windows does is read from Microsoft's
-//! documentation and `std`'s source, and the tests that would measure them on
-//! the Unix arm -- `tests/keystore.rs`'s mode assertions -- are Unix-only.
+//! **Run:** `./board check` passes on a GitHub Windows runner -- Windows
+//! Server 2025, build 26100 -- where every store the tests open is checked by
+//! this file and the keystore makes its lock and temp files through it, and
+//! the three `cfg(windows)` tests in `tests/keystore.rs` pass:
+//! `open_refuses_a_directory_everyone_can_write_to`,
+//! `a_store_created_under_a_writable_parent_inherits_nothing_from_it` and
+//! `a_snapshot_held_open_without_delete_sharing_refuses_the_commit_by_name`.
+//! `FORK.md` records the run.
+//!
+//! **Not established:** the runner's account is an elevated administrator,
+//! and a directory it creates is owned by the Administrators group, so the
+//! owner check met that group and never the user's own SID, which is the owner
+//! an unelevated desktop gives a directory. A null list, an entry type the
+//! check refuses as unread, and a denying entry were not met at all. What this
+//! file says of those rests on Microsoft's documentation and `std`'s source.
 
 use std::ffi::c_void;
 use std::fs::{self, File};

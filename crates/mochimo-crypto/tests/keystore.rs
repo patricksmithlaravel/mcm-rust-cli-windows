@@ -1111,8 +1111,9 @@ fn icacls(path: &std::path::Path, args: &[&str]) {
 /// directory Everyone may modify is refused, by name, and naming Everyone;
 /// the same directory with that entry removed opens.
 ///
-/// **This has not run.** It compiles for `x86_64-pc-windows-msvc`, and the
-/// first board on a Windows host is the first measurement of the refusal.
+/// Green on a GitHub Windows runner, Windows Server 2025 build 26100, whose
+/// account is an elevated administrator and where a new directory is owned
+/// by the Administrators group; `FORK.md` records the run.
 #[cfg(windows)]
 #[test]
 fn open_refuses_a_directory_everyone_can_write_to() {
@@ -1135,7 +1136,7 @@ fn open_refuses_a_directory_everyone_can_write_to() {
 /// and the premise is asserted -- the parent itself is refused. If the store
 /// directory were created without the protected flag it would inherit that
 /// grant and `create` would refuse it; that it opens is the evidence the flag
-/// is set. **This has not run**, as above.
+/// is set. Green on a Windows runner, as above.
 #[cfg(windows)]
 #[test]
 fn a_store_created_under_a_writable_parent_inherits_nothing_from_it() {
@@ -1159,11 +1160,12 @@ fn a_store_created_under_a_writable_parent_inherits_nothing_from_it() {
 /// store reopens at the index it had.
 ///
 /// The holder shares read only, which is the shape of a scanner or an
-/// indexer that did not ask for delete sharing. **This has not run**, and it
-/// can be red for an informative reason: `std` retries a refused replacing
-/// move once with POSIX rename semantics. If that retry replaces a held file
-/// on the Windows it runs on, the commit succeeds, this test says so, and
-/// `ReplaceRefused` is reachable there only through a holder of the temp.
+/// indexer that did not ask for delete sharing. Green on a Windows runner, as
+/// above, which answers the question this test asks: `std` retries a refused
+/// replacing move once with POSIX rename semantics, and on that build the
+/// retry does not replace a held file. On a Windows where it did, this would
+/// be red, the commit would succeed, and `ReplaceRefused` would be reachable
+/// there only through a holder of the temp.
 #[cfg(windows)]
 #[test]
 fn a_snapshot_held_open_without_delete_sharing_refuses_the_commit_by_name() {
