@@ -5,8 +5,10 @@
 # rents the two platforms that host is not, and the third so that all three
 # run the same commit on the same day. Each runs `./board check` -- the script
 # unchanged, from the shell RELEASE.md names for its platform -- and the job's
-# status is the board's. FORK.md, under R1-6, records what its runs have
-# established and what they have not.
+# status is the board's. Beside it, on the same three, a second job runs the
+# check RELEASE.md asks for of the declared minimum compiler; its own head, at
+# the foot of this file, says why it is a job apart. FORK.md, under R1-6,
+# records what the runs have established and what they have not.
 #
 # IT GATES NOTHING, AND IT RUNS ONLY WHEN A PERSON ASKS. RELEASE.md calls itself
 # the manual replacement for automated verification, and this does not replace
@@ -58,9 +60,9 @@ on:
     branches: ['board/**']
   workflow_dispatch:
 
-# The job reads a public repository and writes nothing, so its token is given
-# no permission at all. The clone below is anonymous: if the repository stops
-# being public, that step fails by name rather than this line being widened.
+# Each job reads a public repository and writes nothing, so the token is given
+# no permission at all. The clones below are anonymous: if the repository stops
+# being public, they fail by name rather than this line being widened.
 permissions: {}
 
 jobs:
@@ -170,3 +172,83 @@ jobs:
         run: |
           cd "$MCM"
           ./board check
+
+  # THE DECLARED MINIMUM COMPILER, on every platform. `rust-toolchain.toml`
+  # pins the board to one compiler, so no board row compiles this tree on the
+  # `rust-version` the workspace declares, and RELEASE.md carries the two
+  # commands that do as a gate before a tag -- on every platform, because the
+  # Windows arms compile only on Windows and a Unix host's check says nothing
+  # about them. This job runs those two commands and nothing else.
+  #
+  # A JOB APART, and not two more steps of `check`, so that the board's job
+  # keeps meaning the board: a red here is a finding about the manifest's
+  # minimum, not a board row that failed, and it should not read like one.
+  #
+  # THE VERSION IS READ FROM THE MANIFEST. RELEASE.md writes it out twice and
+  # says nothing holds either copy to `Cargo.toml`; a third copy here would be
+  # the same drift once more. `rust-version = "1.89"` admits 1.89.0 and every
+  # release after it, so 1.89.0 -- the oldest compiler the claim covers -- is
+  # the one a claim about a minimum is checked on, and a two-part version is
+  # given its `.0`.
+  msrv:
+    name: msrv, ${{ matrix.os }}
+    strategy:
+      # As for `check`, and for the same reason.
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # A compiler to install and two `cargo check`s: a fraction of the board.
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Clone the commit under the user's profile
+        # As `check` clones, so that this file has one way of getting the
+        # tree; a `cargo check` does not care where the tree sits.
+        run: |
+          base=$HOME
+          if [ -n "${USERPROFILE:-}" ]; then base=$(cygpath -u "$USERPROFILE"); fi
+          git clone --quiet --no-checkout "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$base/mcm"
+          git -C "$base/mcm" checkout --quiet --detach "$GITHUB_SHA"
+          echo "MCM=$base/mcm" >> "$GITHUB_ENV"
+
+      - name: Install the compiler the manifest declares
+        # Exactly one `rust-version` key, or the job stops by name: a version
+        # this step had to guess at would be a check of the guess.
+        run: |
+          cd "$MCM"
+          if [ "$(grep -c '^rust-version = ' Cargo.toml)" != 1 ]; then
+            echo "Cargo.toml does not declare exactly one rust-version, so there is no one minimum to check." >&2
+            exit 1
+          fi
+          declared=$(sed -n 's/^rust-version = "\(.*\)"$/\1/p' Cargo.toml)
+          case "$declared" in
+            [0-9]*.[0-9]*.[0-9]*) msrv=$declared ;;
+            [0-9]*.[0-9]*) msrv=$declared.0 ;;
+            *)
+              echo "Cargo.toml declares rust-version \"$declared\", which is not a version this job can install." >&2
+              exit 1
+              ;;
+          esac
+          rustup toolchain install "$msrv" --profile minimal --no-self-update
+          echo "MSRV=$msrv" >> "$GITHUB_ENV"
+          echo "commit    $(git rev-parse HEAD)"
+          echo "image     ${ImageOS:-unnamed} ${ImageVersion:-unversioned}"
+          echo "host      $(uname -srm)"
+          echo "declared  rust-version \"$declared\", checked on $msrv"
+          rustc "+$msrv" -vV
+
+      - name: cargo +MSRV check --workspace
+        run: |
+          cd "$MCM"
+          cargo "+$MSRV" check --workspace
+
+      - name: cargo +MSRV check -p mochimo-crypto --features mesh-https
+        # Whatever the command above did, as the board runs every row: the
+        # two are separate claims, and one red should not hide the other.
+        if: ${{ !cancelled() }}
+        run: |
+          cd "$MCM"
+          cargo "+$MSRV" check -p mochimo-crypto --features mesh-https

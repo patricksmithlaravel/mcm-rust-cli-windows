@@ -46,9 +46,9 @@ other** -- a row edited here and not there leaves the script running the old
 board and printing green for it. On Windows it runs unchanged under the POSIX
 shell Git for Windows installs; `board`'s head says what else that host needs
 and why there is no PowerShell copy. `.github/workflows/board.yml` runs
-`./board check` on Linux, macOS and Windows when a person asks for it, and
-gates nothing; `RELEASE.md` says what a run of it does and does not stand in
-for.
+`./board check`, and `RELEASE.md`'s MSRV check beside it, on Linux, macOS and
+Windows when a person asks for it, and gates nothing; `RELEASE.md` says what a
+run of it does and does not stand in for.
 
 `cargo fmt` is not a gate; do not reformat unrelated code.
 

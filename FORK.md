@@ -225,7 +225,7 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | `tests/cli.rs` | one attribute: the `pty` module is `cfg(all(unix, not(miri)))` | its harness is `script(1)`; no assertion changes, which is what the rule about this file protects |
 | `tests/mesh_http.rs` | the refused-connection test has its own five-second connect timeout in place of the shared 500 ms | Windows retries a connect a port refused before reporting it, and on a Windows runner the shared timeout ran out first; Linux and macOS refuse at once, so on Rep-0's platforms the change is inert |
 | `.gitattributes` | every text file checked out with LF, and no `.bin` file converted in either direction | Git for Windows checks out CRLF by default, and the source scans, the JSON fixtures and the trybuild expectations are read byte for byte; two `.bin` fixtures are printable text to git's detection, so the binary files are named rather than detected |
-| `AGENT.md` | the board runs under Git Bash on Windows; the `pty::` count and the board figures are per platform; a workflow runs the board on all three platforms when asked | the board is defined there, and its platform list is what widened |
+| `AGENT.md` | the board runs under Git Bash on Windows; the `pty::` count and the board figures are per platform; a workflow runs the board, and the MSRV check beside it, on all three platforms when asked | the board is defined there, and its platform list is what widened |
 
 #### What Rep-1 may not change
 
@@ -491,14 +491,15 @@ files with `/`, and `.gitattributes` asks for LF. `cargo check --all-targets`
 for the Windows target is clean.
 
 **The runner.** `.github/workflows/board.yml` runs `./board check` on GitHub's
-Linux, macOS and Windows runners at one commit, when a person pushes a branch
-whose name begins `board/`, on its own. It gates nothing and writes no record;
-`RELEASE.md` says what it stands in for, and its own head argues the rest --
-the clone under the user's profile, no actions, `-latest` images, `check`
-rather than `verify`, and why the branch is pushed alone. Its Linux and macOS
-jobs are coverage Rep-0 lacks as much as this tree does. If Rep-0 takes a
-workflow of its own, it is made there and flows down, and this file keeps
-only what Windows adds.
+Linux, macOS and Windows runners at one commit, and in a job of its own
+`RELEASE.md`'s check of the declared minimum compiler, when a person pushes a
+branch whose name begins `board/`, on its own. It gates nothing and writes no
+record; `RELEASE.md` says what it stands in for, and its own head argues the
+rest -- the clone under the user's profile, no actions, `-latest` images,
+`check` rather than `verify`, the minimum compiler as a job apart, and why
+the branch is pushed alone. Its Linux and macOS jobs are coverage Rep-0 lacks
+as much as this tree does. If Rep-0 takes a workflow of its own, it is made
+there and flows down, and this file keeps only what Windows adds.
 
 **Two runs, 2026-09-24.** Each figure is summed from that job's own seventeen
 result lines, read with `gh run view <run> --job <job> --log`:

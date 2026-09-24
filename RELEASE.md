@@ -40,6 +40,9 @@ run, on every platform, at the commit being tagged.
 
       On every platform, and not once: the Windows arms compile only on
       Windows, so a Unix host's check says nothing about the MSRV there.
+      The workflow's `msrv` job runs both commands on all three, reading the
+      version from `Cargo.toml`; a green run of it is evidence for this box,
+      and a person still ticks it.
 
       The version is written out twice here and once in `Cargo.toml`. If
       either moves, this line moves with it -- a version number in a checklist
@@ -106,10 +109,11 @@ claim true.
 
 The gates above ask for three platforms, and this tree is developed on one.
 `.github/workflows/board.yml` runs `./board check` on GitHub's Linux, macOS
-and Windows runners at one commit, when a person pushes a branch whose name
-begins `board/`, on its own -- the workflow's head says why alone -- or, once
-the workflow is on the default branch, dispatches it. `FORK.md` records its
-runs. It is a way to reach a platform, and it changes nothing above:
+and Windows runners at one commit, and in a job of its own the MSRV check
+above, when a person pushes a branch whose name begins `board/`, on its own
+-- the workflow's head says why alone -- or, once the workflow is on the
+default branch, dispatches it. `FORK.md` records its runs. It is a way to
+reach a platform, and it changes nothing above:
 
 - **It gates nothing.** No pull request waits on it and no check is required
   of one.
