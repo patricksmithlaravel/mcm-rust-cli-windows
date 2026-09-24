@@ -109,6 +109,7 @@
 use std::ffi::c_void;
 use std::fs::{self, File};
 use std::io;
+use std::marker::PhantomData;
 use std::os::windows::ffi::OsStrExt;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::path::Path;
@@ -224,9 +225,9 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     let attributes = descriptor.attributes();
     let path = wide(dir)?;
     // SAFETY: `path` is a NUL-terminated UTF-16 buffer that outlives the call,
-    // and `attributes` points at a descriptor `descriptor` keeps alive until
-    // after the call returns.
-    if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
+    // and `attributes` borrows `descriptor`, so the descriptor it points at
+    // outlives the call too.
+    if unsafe { CreateDirectoryW(path.as_ptr(), &attributes.raw) } == 0 {
         return Err(io::Error::last_os_error());
     }
     Ok(())
@@ -255,15 +256,16 @@ fn open_under_private_list(path: &Path, access: u32, disposition: u32, flags: u3
     let descriptor = Private::descriptor(Inherit::Nothing)?;
     let attributes = descriptor.attributes();
     let path = wide(path)?;
-    // SAFETY: `path` is a NUL-terminated UTF-16 buffer and `attributes` points
-    // at a live descriptor, both outliving the call; the template handle is
-    // null, which the function accepts.
+    // SAFETY: `path` is a NUL-terminated UTF-16 buffer that outlives the call,
+    // `attributes` borrows the descriptor it points at, which therefore
+    // outlives the call too, and the template handle is null, which the
+    // function accepts.
     let handle = unsafe {
         CreateFileW(
             path.as_ptr(),
             access,
             STD_SHARE_MODE,
-            &attributes,
+            &attributes.raw,
             disposition,
             FILE_ATTRIBUTE_NORMAL | flags,
             ptr::null_mut(),
@@ -394,14 +396,18 @@ impl Security {
                 &mut descriptor,
             )
         };
-        let descriptor = Local(descriptor);
+        // Owned only once the call has succeeded. Microsoft documents the
+        // descriptor as what a successful call returns and says nothing of the
+        // pointer after a failed one, so a failure leaves it alone: the worst a
+        // failed call can cost is a leak, never a free of something that is not
+        // an allocation.
         if rc != ERROR_SUCCESS {
             return Err(io::Error::from_raw_os_error(rc as i32));
         }
         Ok(Security {
             owner,
             dacl,
-            _descriptor: descriptor,
+            _descriptor: Local(descriptor),
         })
     }
 
@@ -436,7 +442,11 @@ impl Security {
                 if allowed.Mask & WRITE_RIGHTS == 0 {
                     continue;
                 }
-                let sid: PSID = (&raw const allowed.SidStart).cast_mut().cast();
+                // The SID starts at `SidStart` and runs past the end of the
+                // struct, so its pointer is taken from `ace`, which covers the
+                // whole entry, and not through `allowed`, a reference to the
+                // struct's twelve bytes. The offset is the field's own.
+                let sid: PSID = ace.wrapping_byte_add(std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart));
                 let trustee = sid_string(sid)?;
                 if !accepted(&trustee, user) {
                     return Ok(Some((trustee, allowed.Mask)));
@@ -495,25 +505,34 @@ impl Private {
                 ptr::null_mut(),
             )
         };
-        let owned = Local(descriptor);
+        // Owned only once the call has succeeded, as in `Security::of`.
         if ok == 0 {
             return Err(io::Error::last_os_error());
         }
-        Ok(Private(owned))
+        Ok(Private(Local(descriptor)))
     }
 
-    /// The attributes a create call takes.
-    ///
-    /// The value holds a raw pointer into `self` and no lifetime ties the two,
-    /// so the type does not stop it outliving the descriptor. Both callers
-    /// build it on the line after the descriptor and pass it to a call on the
-    /// line after that, with the descriptor still in scope; that adjacency is
-    /// the whole guarantee, and it is why this is private to the file.
-    fn attributes(&self) -> SECURITY_ATTRIBUTES {
-        SECURITY_ATTRIBUTES {
-            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
-            lpSecurityDescriptor: self.0 .0,
-            bInheritHandle: 0,
+    /// The attributes a create call takes; see [`Attributes`].
+    fn attributes(&self) -> Attributes<'_> {
+        Attributes {
+            raw: SECURITY_ATTRIBUTES {
+                nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+                lpSecurityDescriptor: self.0 .0,
+                bInheritHandle: 0,
+            },
+            _descriptor: PhantomData,
         }
     }
+}
+
+/// The attributes a create call takes, borrowing the descriptor they point
+/// into.
+///
+/// `raw` holds a raw pointer into a [`Private`], which by itself ties it to
+/// nothing. The borrow is what does: an `Attributes` cannot outlive the
+/// descriptor it came from, so the compiler, and not the order of the lines
+/// that use it, keeps the descriptor alive for the call it is passed to.
+struct Attributes<'a> {
+    raw: SECURITY_ATTRIBUTES,
+    _descriptor: PhantomData<&'a Private>,
 }
