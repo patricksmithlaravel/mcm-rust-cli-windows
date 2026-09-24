@@ -830,7 +830,7 @@ use console::{open_terminal, os_bytes, EchoGuard};
 /// **None of this has run.** It compiles and passes clippy for
 /// `x86_64-pc-windows-msvc` from a macOS host, and nothing here has executed
 /// on Windows. `tests/cli.rs`'s pseudo-terminal harness is what establishes
-/// the Unix arm's prompts, and it has no Windows counterpart. Three things in
+/// the Unix arm's prompts, and it has no Windows counterpart. Four things in
 /// particular are read from documentation and not measured:
 ///
 /// * Under a terminal that is not a Windows console and hosts no
@@ -845,6 +845,12 @@ use console::{open_terminal, os_bytes, EchoGuard};
 /// * The console mode belongs to the console's input buffer, which the
 ///   parent shell shares. Restoring it is the guard's job on every path that
 ///   unwinds, and it is checked where a visible answer depends on it.
+/// * A line longer than one read arrives over several `ReadConsoleW` calls,
+///   and a long phrase is one: at the sizes `READ_UNITS`'s doc gives, its 215
+///   characters and CR LF take two. Joining them rests on the console keeping
+///   the rest of a cooked line for the next call. Microsoft's page on the
+///   high-level console functions says as much -- "Unread characters are
+///   buffered until the next read operation" -- and nothing has run it.
 #[cfg(windows)]
 mod console {
     use std::fs::File;
@@ -860,13 +866,29 @@ mod console {
 
     use super::Tty;
 
-    /// The most UTF-16 units asked of one `ReadConsoleW`. A line longer than
-    /// this arrives over several reads, which `BufReader::read_line` joins.
+    /// The most UTF-16 units asked of one `ReadConsoleW`, whatever buffer a
+    /// caller offers: a ceiling, and not the bound that binds. `Console::read`
+    /// asks for a third of the buffer it is offered, less a unit, and
+    /// `read_scrubbed_line` offers `PHRASE_CAPACITY` bytes, so one read takes
+    /// at most 169 units, and one more when it ends on a high surrogate. A
+    /// line longer than that arrives over several reads, which
+    /// `read_scrubbed_line` joins: a twenty-four-word phrase can be 215
+    /// characters and a CR LF, so a long one takes two. The module's list of
+    /// what is not established says what the joining rests on.
     const READ_UNITS: usize = 4096;
 
-    /// What a line beginning with `Ctrl-Z` means at a Windows console: end of
+    /// What a read beginning with `Ctrl-Z` means at a Windows console: end of
     /// input, as `std`'s own console reader treats it. It reaches the shared
-    /// code as a zero-byte read, which is refused as `END_OF_INPUT`.
+    /// code as a zero-byte read, which is refused as `END_OF_INPUT` when
+    /// nothing came before it on the line.
+    ///
+    /// **The test is per read, not per line.** In a line longer than one read,
+    /// a `Ctrl-Z` that falls first in a later read -- at the size
+    /// `READ_UNITS`'s doc gives, the 170th character of a line with no
+    /// surrogate pair before it -- ends the input there: what came before it
+    /// is returned as the line, the rest of that read is dropped, and anything
+    /// past that read is left in the console for whatever reads next. A
+    /// `Ctrl-Z` anywhere else in a line is a character like any other.
     const CTRL_Z: u16 = 0x1A;
 
     /// The console's input buffer and active screen buffer.
