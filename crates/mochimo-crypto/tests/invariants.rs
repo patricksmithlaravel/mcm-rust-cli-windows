@@ -2064,79 +2064,6 @@ fn key_signs_once_per_keystore_with_the_raw_signer_crate_private_not_absent() {
     );
 }
 
-/// The route scan behind I1: no wallet-visible function hands out a WOTS+
-/// signature except the one allow-listed signer. The fail-closed absence
-/// check an absence property asks for -- a compile-fail case pins a spelling somebody
-/// thought of; this ranges over the real surface and allow-lists the
-/// permitted routes, so a NEW route to a signature reddens without anyone
-/// having guessed its name.
-///
-/// # The predicate
-///
-/// A function is flagged when it is **wallet-visible** and either
-/// **produces** a signature-bearing value or **reaches the signer**:
-///
-/// * *wallet-visible*: declared bare `pub`, inside modules that are bare
-///   `pub` all the way up **in the wallet view** -- a `mod` declaration under
-///   `cfg(feature = "raw-backend")` is dropped and its `cfg(not(..))` twin
-///   kept, so `backend` resolves to `pub(crate)` the way a dependent sees it;
-///   an impl method needs a bare-`pub` self type; a `pub use` in a visible
-///   module lifts what it names.
-/// * *produces*: the return type, or a non-`self` `&mut` parameter, mentions
-///   a **bearing** type -- the fixpoint from the tokens `SIG_LEN`,
-///   `WOTSSIGBYTES` and the literal `2144` through type aliases
-///   (`Signature`) and fields (`SpendSignature`, `WotsVal`, `Transaction`).
-/// * *reaches the signer*: the body fixpoint from the idents `wots_sign`,
-///   `wots_sign_counted`, `sign_spend` and the path `wots::sign`, through
-///   every function whose body names a tainted one.
-///
-/// Allow-list, keyed by file and name, an unused entry being itself a red:
-/// `Signer` (exactly one, `Keystore::sign_spend`); `Reader` (functions that
-/// hand a signature *back* -- `TxEntry::wots_signature`, the `Transaction`
-/// constructors -- each checked mechanically to take no key-material holder
-/// and to reach no signer, so a signer cannot be smuggled in as a reader).
-///
-/// # What it cannot see, said here
-///
-/// A signer re-implemented from scratch over `backend::native::gen_chain`
-/// and `Secret::expose`, returning a `PublicKey`-typed value: the type arm
-/// sees `SIG_LEN` spellings, the body arm sees the signer's names, and the
-/// two aliases `PublicKey`/`Signature` are one type. That needs in-crate
-/// code (`backend` is crate-private outside the feature), and it is the
-/// "crate-private, not absent" bound in the I1 marker's name. Also: a
-/// function taking its secret as bare `&[u8; 32]` passes the reader check.
-///
-/// # Its own controls
-///
-/// The two ports of `wots.c`'s `wots_sign` must be found AND found
-/// crate-private; `backend` must resolve Restricted; `Signature` must be
-/// bearing; at least 150 signatures examined; and the predicate is run over
-/// an embedded control crate in which a visible wrapper over `wots::sign`,
-/// a visible `-> Box<[u8; SIG_LEN]>`, and the same under a `pub(crate)`
-/// module must flag, flag, and not flag respectively.
-/// **The decision layer carries no prose.**
-///
-/// `cli::outcome` is what a command established; `cli::render` is what the
-/// program says about it. The split is only worth having while the first of
-/// those cannot quietly become the second, and the way it becomes the second
-/// is one variant with a `String` in it -- a page already built, handed
-/// through a type that claims to be a decision. One such field and a
-/// dependent can no longer tell which variants it may act on and which it may
-/// only print.
-///
-/// So the scan is exact rather than tasteful: **no `String` anywhere in
-/// `cli/outcome.rs`**, comments stripped. The module needs none today, and a
-/// variant that genuinely needs one is a variant whose data has not been
-/// found yet -- which is a conversation to have at this test, not a field to
-/// add quietly.
-///
-/// `&'static str` is not what this catches and should not be: a fixed string
-/// is a discriminant with a readable spelling, not a page. Nothing in the
-/// module uses one either.
-///
-/// The paired half is structural and needs no test: `render::outcome`
-/// matches `Outcome` exhaustively, so a variant added without a rendering is
-/// a compile error rather than a silent blank page.
 /// **The platform surface is the files the port touched, and no others.**
 ///
 /// This crate builds for Unix and for Windows and refuses every other target,
@@ -2226,6 +2153,29 @@ fn the_unix_surface_is_confined_to_the_files_a_port_would_touch() {
     }
 }
 
+/// **The decision layer carries no prose.**
+///
+/// `cli::outcome` is what a command established; `cli::render` is what the
+/// program says about it. The split is only worth having while the first of
+/// those cannot quietly become the second, and the way it becomes the second
+/// is one variant with a `String` in it -- a page already built, handed
+/// through a type that claims to be a decision. One such field and a
+/// dependent can no longer tell which variants it may act on and which it may
+/// only print.
+///
+/// So the scan is exact rather than tasteful: **no `String` anywhere in
+/// `cli/outcome.rs`**, comments stripped. The module needs none today, and a
+/// variant that genuinely needs one is a variant whose data has not been
+/// found yet -- which is a conversation to have at this test, not a field to
+/// add quietly.
+///
+/// `&'static str` is not what this catches and should not be: a fixed string
+/// is a discriminant with a readable spelling, not a page. Nothing in the
+/// module uses one either.
+///
+/// The paired half is structural and needs no test: `render::outcome`
+/// matches `Outcome` exhaustively, so a variant added without a rendering is
+/// a compile error rather than a silent blank page.
 #[test]
 fn the_decision_layer_carries_no_prose() {
     let src = code_only(&read_crate_file("crates/mochimo-crypto/src/cli/outcome.rs"));
@@ -2252,6 +2202,56 @@ fn the_decision_layer_carries_no_prose() {
     );
 }
 
+/// The route scan behind I1: no wallet-visible function hands out a WOTS+
+/// signature except the one allow-listed signer. The fail-closed absence
+/// check an absence property asks for -- a compile-fail case pins a spelling somebody
+/// thought of; this ranges over the real surface and allow-lists the
+/// permitted routes, so a NEW route to a signature reddens without anyone
+/// having guessed its name.
+///
+/// # The predicate
+///
+/// A function is flagged when it is **wallet-visible** and either
+/// **produces** a signature-bearing value or **reaches the signer**:
+///
+/// * *wallet-visible*: declared bare `pub`, inside modules that are bare
+///   `pub` all the way up **in the wallet view** -- a `mod` declaration under
+///   `cfg(feature = "raw-backend")` is dropped and its `cfg(not(..))` twin
+///   kept, so `backend` resolves to `pub(crate)` the way a dependent sees it;
+///   an impl method needs a bare-`pub` self type; a `pub use` in a visible
+///   module lifts what it names.
+/// * *produces*: the return type, or a non-`self` `&mut` parameter, mentions
+///   a **bearing** type -- the fixpoint from the tokens `SIG_LEN`,
+///   `WOTSSIGBYTES` and the literal `2144` through type aliases
+///   (`Signature`) and fields (`SpendSignature`, `WotsVal`, `Transaction`).
+/// * *reaches the signer*: the body fixpoint from the idents `wots_sign`,
+///   `wots_sign_counted`, `sign_spend` and the path `wots::sign`, through
+///   every function whose body names a tainted one.
+///
+/// Allow-list, keyed by file and name, an unused entry being itself a red:
+/// `Signer` (exactly one, `Keystore::sign_spend`); `Reader` (functions that
+/// hand a signature *back* -- `TxEntry::wots_signature`, the `Transaction`
+/// constructors -- each checked mechanically to take no key-material holder
+/// and to reach no signer, so a signer cannot be smuggled in as a reader).
+///
+/// # What it cannot see, said here
+///
+/// A signer re-implemented from scratch over `backend::native::gen_chain`
+/// and `Secret::expose`, returning a `PublicKey`-typed value: the type arm
+/// sees `SIG_LEN` spellings, the body arm sees the signer's names, and the
+/// two aliases `PublicKey`/`Signature` are one type. That needs in-crate
+/// code (`backend` is crate-private outside the feature), and it is the
+/// "crate-private, not absent" bound in the I1 marker's name. Also: a
+/// function taking its secret as bare `&[u8; 32]` passes the reader check.
+///
+/// # Its own controls
+///
+/// The two ports of `wots.c`'s `wots_sign` must be found AND found
+/// crate-private; `backend` must resolve Restricted; `Signature` must be
+/// bearing; at least 150 signatures examined; and the predicate is run over
+/// an embedded control crate in which a visible wrapper over `wots::sign`,
+/// a visible `-> Box<[u8; SIG_LEN]>`, and the same under a `pub(crate)`
+/// module must flag, flag, and not flag respectively.
 #[test]
 fn no_wallet_visible_fn_hands_out_a_wots_signature() {
     let files = crate_source_files();

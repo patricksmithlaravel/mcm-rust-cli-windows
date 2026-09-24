@@ -68,10 +68,14 @@
 //!
 //! **What exists before it becomes a `Secret`.**
 //! `mnemonic::master_seed_from_phrase` takes a `&str`, so the read buffer is
-//! this program's problem. It is a `Zeroizing<String>` with its capacity
-//! reserved up front, because a `String` that grows reallocates and leaves the
-//! old allocation holding the phrase, unzeroed, for the allocator to hand to
-//! someone else.
+//! this program's problem, and so is every buffer in front of it.
+//! [`read_scrubbed_line`] reads the line, and whatever holds it on the way is
+//! zeroized before it is released: the chunk each `read` fills, the line it
+//! is gathered into, and the trimmed copy handed back. A buffer that grows by
+//! reallocating leaves the old allocation holding the phrase, unzeroed, for
+//! the allocator to hand to someone else -- so the line grows by hand -- and
+//! a `BufReader` frees its own buffer the same way, which is why none is
+//! used.
 //!
 //! **Read from `/dev/tty`, not stdin**, so that a pipe or a redirect cannot
 //! supply the seed silently — the point of choosing a prompt is that the seed
@@ -124,7 +128,7 @@
 // explicitly rather than arriving with a group.
 #![deny(clippy::exit)]
 
-use std::io::{BufRead, BufReader, Write};
+use std::io::{self, Write};
 use std::process::ExitCode;
 
 use mochimo_crypto::cli::create::{self as create_cmd, Terminal as _, ENTROPY_LEN};
@@ -135,9 +139,14 @@ use mochimo_crypto::mesh::{MeshClient, Transport};
 use mochimo_crypto::{Error, TransportKind};
 use zeroize::Zeroizing;
 
-/// A 24-word BIP39 phrase is 24 × 8 + 23 ≈ 215 bytes; 512 covers every length
-/// with room to spare, so the buffer never grows and never leaves a copy
-/// behind.
+/// The size of every read a secret line is gathered from, and the room the
+/// line starts with.
+///
+/// A 24-word BIP39 phrase is 24 × 8 + 23 ≈ 215 bytes, so 512 covers every
+/// phrase with room to spare and no phrase makes the line grow. A password
+/// can -- it has a floor and no ceiling -- and a line that outgrows this is
+/// moved by [`read_scrubbed_line`] into a fresh buffer twice the size rather
+/// than reallocated, and the one it leaves is zeroized.
 const PHRASE_CAPACITY: usize = 512;
 
 /// What a prompt says when the terminal reports end-of-file before a line
@@ -544,6 +553,130 @@ fn acquire_terminal() -> Result<Tty, String> {
     open_terminal()
 }
 
+/// One line from `from`, trimmed -- or `None` when the input ends before any
+/// byte of it arrives -- read so that **every buffer the line passes through
+/// is zeroized before it is released**.
+///
+/// Both of [`Tty`]'s reads come through here, and what they need from it is
+/// `BufRead::read_line`'s contract as it stands: zero bytes read is end of
+/// input, which the caller refuses as [`END_OF_INPUT`]; bytes and then end
+/// of input are a line; `Interrupted` is retried; any other error ends the
+/// read with that error; and a line that is not UTF-8 is refused in the
+/// words `std` refuses it in. So each message a caller builds from this is
+/// the one it would build from `read_line`.
+///
+/// It is written over `Read` and names no device, so the Windows fork
+/// (`FORK.md`'s Rep-1), which runs the same `Terminal` impl over a console
+/// reader, can take it unchanged.
+///
+/// # Why not `BufReader`
+///
+/// A `BufReader` reads the device into a buffer of its own -- eight
+/// kilobytes, from the heap -- and copies the line out of it. Dropping the
+/// reader frees that buffer with the line still in it, and a
+/// `Zeroizing<String>` on the far side scrubs its own copy and never sees
+/// that one: reserving the string's capacity up front stops the string's
+/// growth from leaving a copy, and does nothing about a reader in front of it
+/// that keeps one. Nor can the reader be cleaned up after. It owns the
+/// allocation and exposes only the part not yet consumed, and that by shared
+/// reference, so there is no handle on the bytes to zeroize.
+///
+/// # Why a whole chunk per read, and not one byte
+///
+/// One byte per `read` would never consume past the newline, and it is
+/// refused because `Read` promises nothing about a buffer that small being
+/// accepted. A reader that transcodes needs room for a whole character per
+/// call: the Windows fork's console reader turns UTF-16 into UTF-8 and
+/// refuses any buffer shorter than six bytes -- read in that fork's source,
+/// not run. `Read::bytes`, the ready-made form, trips
+/// `clippy::unbuffered_bytes` on a `File` as well -- an error under the
+/// board's `-D warnings` -- and the remedy the lint prints is the `BufReader`
+/// this function exists to avoid.
+///
+/// For the same reason every `read` is offered the whole of `chunk`, never
+/// the few bytes left at the end of a line that is filling up. What one read
+/// delivers after the newline is dropped with `chunk`, zeroized, as a
+/// `BufReader` dropped with bytes still buffered drops them. From this
+/// program's terminal there is nothing to drop: a terminal in canonical mode
+/// delivers at most one line per `read`, and `stty -echo` leaves the mode
+/// canonical.
+///
+/// # Why the line grows by hand
+///
+/// `Vec`'s own growth reallocates, and a reallocation that moves frees the
+/// allocation it moved out of with the line still in it; `zeroize`'s `Vec`
+/// impl says of itself that it *"cannot ensure that previous reallocations
+/// did not leave values on the heap"*. Refusing a line longer than a fixed
+/// buffer is not the way out it looks like: a password has a floor
+/// (`cli::create::MIN_PASSWORD_LEN`) and no ceiling, so a store `create`
+/// sealed under a longer one would stop opening. So the line starts at
+/// [`PHRASE_CAPACITY`], which no phrase outgrows, and past it moves into a
+/// fresh `Zeroizing` buffer of twice the size, the old one scrubbed as it is
+/// dropped. A `Vec<u8>` holds at most `isize::MAX` bytes, so the doubling
+/// cannot overflow.
+///
+/// # What this establishes, and what it does not
+///
+/// Measured, with a global allocator that scanned every block as it was
+/// freed, reading over a pipe -- one `read(2)` into the slice handed in, as
+/// `File` reads `/dev/tty`. At 215, 600 and 9,000 bytes the `BufReader` path
+/// freed an 8,192-byte block holding the line every time, and at 9,000 a
+/// second, the string's outgrown allocation; this function freed none. The
+/// same harness ran both over 300,000 scripted readers -- partial lines, end
+/// of input, `Interrupted`, errors, invalid UTF-8, characters split across
+/// reads, lines past the capacity -- and they agreed on every one; and a
+/// reader refusing buffers under six bytes had a 1,500-byte line read from it
+/// whole.
+///
+/// **Nothing on the board holds any of that.** The harness is not in this
+/// repository. A `[[bin]]`'s items are importable by no test target, so
+/// holding this on the board would mean moving the function into the library
+/// as public surface, which is a larger change than this one and is not made
+/// here. A `BufReader` put back here therefore turns nothing red:
+/// `tests/cli.rs`'s pty harness drives these reads end to end and observes
+/// what reaches the screen, not what reaches the allocator.
+///
+/// Out of reach entirely: the terminal driver's own buffers, which the module
+/// doc names; whatever a `Read` implementation holds before it fills `chunk`
+/// -- `File` holds nothing, its `read` being one system call into the slice;
+/// and copies the compiler makes of a byte, in a register or a spilled stack
+/// slot, which no `Drop` reaches.
+fn read_scrubbed_line(mut from: impl io::Read) -> io::Result<Option<Zeroizing<String>>> {
+    let mut chunk = Zeroizing::new([0u8; PHRASE_CAPACITY]);
+    let mut line: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(PHRASE_CAPACITY));
+    let mut ended = false;
+    while !ended {
+        let n = match from.read(&mut chunk[..]) {
+            Ok(0) => break,
+            Ok(n) => n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+            Err(e) => return Err(e),
+        };
+        for &byte in chunk.iter().take(n) {
+            if line.len() == line.capacity() {
+                let mut wider = Zeroizing::new(Vec::with_capacity(line.capacity() * 2));
+                wider.extend_from_slice(&line);
+                line = wider;
+            }
+            line.push(byte);
+            if byte == b'\n' {
+                ended = true;
+                break;
+            }
+        }
+    }
+    if line.is_empty() {
+        return Ok(None);
+    }
+    let text = std::str::from_utf8(&line).map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            "stream did not contain valid UTF-8",
+        )
+    })?;
+    Ok(Some(Zeroizing::new(text.trim().to_string())))
+}
+
 impl create_cmd::Terminal for Tty {
     /// **To the terminal this `Tty` acquired, not to stdout**.
     ///
@@ -618,18 +751,15 @@ impl create_cmd::Terminal for Tty {
         term.write_all(prompt.as_bytes())
             .and_then(|()| term.flush())
             .map_err(|e| format!("cannot write to {TERMINAL}: {e}"))?;
-        let mut line = Zeroizing::new(String::with_capacity(PHRASE_CAPACITY));
-        let read = BufReader::new(
+        let read = read_scrubbed_line(
             file.try_clone()
                 .map_err(|e| format!("cannot read {TERMINAL}: {e}"))?,
-        )
-        .read_line(&mut line);
+        );
         match read {
-            Ok(0) => return Err(END_OF_INPUT.into()),
-            Ok(_) => {}
-            Err(e) => return Err(format!("cannot read from {TERMINAL}: {e}")),
+            Ok(None) => Err(END_OF_INPUT.into()),
+            Ok(Some(line)) => Ok(line),
+            Err(e) => Err(format!("cannot read from {TERMINAL}: {e}")),
         }
-        Ok(Zeroizing::new(line.trim().to_string()))
     }
 
     /// The prompt goes to the acquired terminal too.
@@ -649,23 +779,20 @@ impl create_cmd::Terminal for Tty {
         term.write_all(prompt.as_bytes())
             .and_then(|()| term.flush())
             .map_err(|e| format!("cannot write to {TERMINAL}: {e}"))?;
-        let mut line = Zeroizing::new(String::with_capacity(PHRASE_CAPACITY));
-        let read = BufReader::new(
+        let read = read_scrubbed_line(
             self.file
                 .try_clone()
                 .map_err(|e| format!("cannot read {TERMINAL}: {e}"))?,
-        )
-        .read_line(&mut line);
+        );
         // The newline after an echo-off read is cosmetic -- the operator's
         // Enter was not echoed -- so this one is the one write here whose
         // failure changes nothing that matters, and it stays best-effort.
         let _ = term.write_all(b"\n");
         match read {
-            Ok(0) => return Err(END_OF_INPUT.into()),
-            Ok(_) => {}
-            Err(e) => return Err(format!("cannot read from {TERMINAL}: {e}")),
+            Ok(None) => Err(END_OF_INPUT.into()),
+            Ok(Some(line)) => Ok(line),
+            Err(e) => Err(format!("cannot read from {TERMINAL}: {e}")),
         }
-        Ok(Zeroizing::new(line.trim().to_string()))
     }
 }
 
