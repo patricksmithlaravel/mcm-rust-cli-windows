@@ -248,10 +248,24 @@ fn a_refused_connection_is_reported_by_kind() {
         let l = TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("bind: {e}"));
         l.local_addr().unwrap_or_else(|e| panic!("local_addr: {e}")).port()
     };
-    let err = transport(&format!("http://127.0.0.1:{port}"))
-        .post("/call", b"{}")
-        .err()
-        .unwrap_or_else(|| panic!("a refused connection returned a body"));
+    // Its own timeouts, not `transport`'s. The kind asserted below is the
+    // platform's report of the refusal, and when that report comes is the
+    // platform's too: at once on Linux and macOS, while Windows retries a
+    // connect the port refused before it gives up. Measured on a Windows
+    // runner: with `transport`'s 500 ms the refusal was still unreported when
+    // the timeout ran out, and the error was `Timeout`. Five seconds is far
+    // past those retries, so what this asserts is the classification and not
+    // which of two clocks ran out first; on a platform that refuses at once
+    // it costs nothing.
+    let err = UreqTransport::with_timeouts(
+        &format!("http://127.0.0.1:{port}"),
+        Duration::from_secs(5),
+        Duration::from_secs(6),
+    )
+    .unwrap_or_else(|e| panic!("transport: {e}"))
+    .post("/call", b"{}")
+    .err()
+    .unwrap_or_else(|| panic!("a refused connection returned a body"));
     assert!(
         matches!(err, Error::Transport { kind: TransportKind::Connect, .. }),
         "{err:?}"
