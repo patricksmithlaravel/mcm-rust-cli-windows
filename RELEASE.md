@@ -102,6 +102,33 @@ A green board on one platform is evidence about that platform. Running it on
 another is not duplication; it is the only thing that makes that platform's
 claim true.
 
+## Hosts this repository does not have
+
+The gates above ask for three platforms, and this tree is developed on one.
+`.github/workflows/board.yml` runs `./board check` on GitHub's Linux, macOS
+and Windows runners at one commit, when a person pushes a branch whose name
+begins `board/` -- or, once the workflow is on the default branch, dispatches
+it. It is a way to reach a platform, and it changes nothing above:
+
+- **It gates nothing.** No pull request waits on it and no check is required
+  of one.
+- **It runs `check`, not `verify`.** A green run is evidence about the board
+  on that platform, and the record below is for `verify`. Whether the Miri
+  run finishes inside a hosted job's six hours has not been measured.
+- **It writes nothing here.** The run's log is the transcript, GitHub deletes
+  it when its retention period ends, and the record is what a person copies
+  out of it before then.
+- **A runner is not an operator's machine.** GitHub documents its Windows
+  runners as administrators with User Account Control disabled, so the
+  access-list check can meet the Administrators group as the owner of every
+  store the tests create, where an unelevated desktop meets the user. The
+  workflow prints the token, and the owner a new directory gets, beside the
+  board.
+
+The workflow's head carries the rest of its argument: why it clones under the
+user's profile rather than into the runner's workspace, why it uses no
+actions, and why its images are `-latest`.
+
 ## What this checklist does not reach
 
 Stated here for the same reason `AGENT.md` states it of the board: a gate that

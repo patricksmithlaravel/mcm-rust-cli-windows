@@ -223,7 +223,7 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | `tests/keystore.rs` | the three mode-bit tests are `cfg(unix)`; three `cfg(windows)` tests measure the access-list refusal, the protected creation and the named rename refusal | mode bits do not exist on Windows, and the Windows claims need a test that runs there |
 | `tests/cli.rs` | one attribute: the `pty` module is `cfg(all(unix, not(miri)))` | its harness is `script(1)`; no assertion changes, which is what the rule about this file protects |
 | `.gitattributes` | every text file checked out with LF | Git for Windows checks out CRLF by default, and the source scans, the JSON fixtures and the trybuild expectations are read byte for byte |
-| `AGENT.md` | the board runs under Git Bash on Windows; the `pty::` count and the board figures are per platform | the board is defined there, and its platform list is what widened |
+| `AGENT.md` | the board runs under Git Bash on Windows; the `pty::` count and the board figures are per platform; a workflow runs the board on all three platforms when asked | the board is defined there, and its platform list is what widened |
 
 #### What Rep-1 may not change
 
@@ -479,6 +479,19 @@ tests and the `pty` module are `cfg(unix)`, the invariant suite's walks name
 files with `/`, and `.gitattributes` asks for LF. `cargo check --all-targets`
 for the Windows target is clean. **No board has run on Windows**; that is the
 next thing to do, and it needs a Windows host or a CI runner.
+
+**The runner, written 2026-09-24 and not yet run.**
+`.github/workflows/board.yml` runs `./board check` on GitHub's Linux, macOS
+and Windows runners at one commit, when a person pushes a branch whose name
+begins `board/`. It gates nothing and writes no record; `RELEASE.md` says what
+it stands in for, and its own head argues the rest -- the clone under the
+user's profile, no actions, `-latest` images, and `check` rather than
+`verify`. Its first run measures two platforms, not one: no board run on Linux
+is on record either, since `RELEASE.md`'s record is empty and `tests/cli.rs`
+marks its util-linux `script(1)` form unmeasured. That also makes its Linux
+and macOS jobs coverage Rep-0 lacks as much as this tree does. If Rep-0 takes
+a workflow of its own, it is made there and flows down, and this file keeps
+only what Windows adds.
 
 ### R1-7 -- the surface check **(done, 2026-09-22)**
 

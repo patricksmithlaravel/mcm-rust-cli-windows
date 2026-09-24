@@ -1,0 +1,168 @@
+# The board, on the hosts this repository's development machine is not.
+#
+# RELEASE.md asks for a green board on Linux, macOS and Windows at the commit
+# being tagged, and this tree is developed on one macOS host. Nothing has run
+# on Windows, and no board run on Linux is on record either: RELEASE.md's
+# record is empty, and `tests/cli.rs` marks its util-linux `script(1)` form
+# unmeasured.
+# This workflow rents the two missing hosts, and the third so that all three
+# run the same commit on the same day. Each runs `./board check` -- the script
+# unchanged, from the shell RELEASE.md names for its platform -- and the job's
+# status is the board's.
+#
+# IT GATES NOTHING, AND IT RUNS ONLY WHEN A PERSON ASKS. RELEASE.md calls itself
+# the manual replacement for automated verification, and this does not replace
+# it. There is no `pull_request` trigger and no required check; nothing here
+# writes the record, and a green run is not a row in it -- the record is for
+# `verify`. A run starts when someone pushes a branch whose name begins
+# `board/`, which works before this file reaches the default branch, or
+# dispatches the workflow from the Actions tab, which works only after. What a
+# run leaves is a log. A person reads it and writes down what it says; GitHub
+# deletes the log when its retention period ends, which is one more reason the
+# record is kept in RELEASE.md and not here.
+#
+# `check`, NOT `verify`. `verify` adds `cargo deny check` and the Miri run,
+# which AGENT.md puts at hours rather than minutes. A hosted job is stopped
+# at six hours, and whether Miri on these runners finishes inside that has not
+# been measured -- nor what it does on Windows, where the keystore's
+# access-list arm is foreign calls and Miri cannot interpret a foreign call.
+# RELEASE.md's tag gate still asks for `verify` on each platform.
+#
+# NO ACTIONS. Every step is a command against tools the runner image already
+# carries: git, rustup, a C compiler for `ring`. A `uses:` line is another
+# repository's code, run inside this job beside the tree -- pinned by tag it
+# can move, and pinned by hash it is still code nobody here has read -- and
+# nothing this job needs is something `git clone` and `rustup` do not supply.
+# The cost is stated rather than hidden: no dependency cache, so every run
+# builds cold; and no uploaded artifact, so the transcript is the job log.
+#
+# WHAT A GREEN RUN DOES NOT SAY. Everything RELEASE.md says a green Windows
+# board does not say, and one thing more. GitHub documents its Windows runners
+# as administrators with User Account Control disabled, and on Windows Server,
+# which they run, what an elevated administrator creates is owned by the
+# Administrators group unless a policy says otherwise -- so on a runner the
+# access-list check can meet that group as the owner, where on an operator's
+# unelevated desktop it meets the user. The check accepts both, and a runner
+# measures one of them. The step before the board prints the token and the
+# owner a directory created there actually gets, so a reader can tell which a
+# result is about.
+
+name: board
+
+on:
+  push:
+    branches: ['board/**']
+  workflow_dispatch:
+
+# The job reads a public repository and writes nothing, so its token is given
+# no permission at all. The clone below is anonymous: if the repository stops
+# being public, that step fails by name rather than this line being widened.
+permissions: {}
+
+jobs:
+  check:
+    name: board check, ${{ matrix.os }}
+    strategy:
+      # A red platform does not cancel the other two. They are what a reader
+      # compares it with, which is the board's own reason for running its test
+      # row `--no-fail-fast`, one level up.
+      fail-fast: false
+      matrix:
+        # `-latest` rather than a pinned image. What the record needs is the
+        # host a run happened on, and the job prints that -- the image by name
+        # and version below, the kernel in the board's own summary. A pinned
+        # image stops starting when GitHub retires it, which is a red run no
+        # commit caused; `-latest` moves without a commit instead, and the
+        # printed image is what makes two runs comparable either way.
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    # A cold build and the whole board on the slowest of the three, with room
+    # for the pty harness's worst case -- every one of its eighteen tests
+    # running out its 300-second step -- to end in the harness's own failure
+    # and let the rows after it report. A hang past that ends here, as a
+    # failure, rather than at the six-hour cap.
+    timeout-minutes: 120
+    defaults:
+      run:
+        # On Windows this is Git Bash, the shell RELEASE.md names there.
+        shell: bash
+    steps:
+      - name: Clone the commit under the user's profile
+        # Under the profile, and not in the runner's workspace, for the reason
+        # RELEASE.md gives a person doing this by hand. Three tests in
+        # `tests/keystore.rs` make their own store directory under `target/`
+        # rather than letting the keystore make it, so it inherits its
+        # ancestors' list, and a folder outside the profile can inherit a grant
+        # to other users, which the access-list check refuses -- the check
+        # working, and a red row that says nothing about the commit. On
+        # Windows the profile is read from `USERPROFILE` rather than trusting
+        # `HOME` to name it; elsewhere `HOME` is the same place.
+        run: |
+          base=$HOME
+          if [ -n "${USERPROFILE:-}" ]; then base=$(cygpath -u "$USERPROFILE"); fi
+          git clone --quiet --no-checkout "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git" "$base/mcm"
+          git -C "$base/mcm" checkout --quiet --detach "$GITHUB_SHA"
+          echo "MCM=$base/mcm" >> "$GITHUB_ENV"
+
+      - name: Refuse a checkout that is not the commit's bytes
+        # `.gitattributes` asks for LF on every text file, because the
+        # invariant suite, the fixtures and the trybuild expectations are read
+        # byte for byte and Git for Windows checks out CRLF by default. Whether
+        # it held is asked of git rather than assumed: a file git reports as
+        # CRLF in the working tree is a tree the board would measure in place
+        # of the commit. The tally after it is the evidence when there is none.
+        run: |
+          cd "$MCM"
+          eol=$(git ls-files --eol)
+          if printf '%s\n' "$eol" | grep 'w/crlf'; then
+            echo "The files above were checked out with CRLF line endings, so the board would measure a tree that is not the commit." >&2
+            exit 1
+          fi
+          printf '%s\n' "$eol" | awk '{ print $1, $2 }' | sort | uniq -c
+
+      - name: Name the commit, the host and the toolchain
+        # What a row of RELEASE.md's record needs, printed before the board so
+        # it is in the log whatever the board does. `rustup toolchain install`
+        # with no argument installs the toolchain `rust-toolchain.toml` pins
+        # and nothing else, and the versions printed are what would show that
+        # another compiler ran. `--no-self-update`, because by default the
+        # same command also replaces rustup itself when a newer one exists,
+        # and the image's installer is not what this run measures.
+        run: |
+          cd "$MCM"
+          rustup toolchain install --no-self-update
+          echo "commit  $(git rev-parse HEAD)"
+          echo "date    $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          echo "image   ${ImageOS:-unnamed} ${ImageVersion:-unversioned}"
+          echo "host    $(uname -srm)"
+          rustc -vV
+          cargo -V
+
+      - name: Print what the access-list tests stand on
+        if: runner.os == 'Windows'
+        # The access-list check runs wherever a test opens a store on Windows,
+        # and the three `cfg(windows)` tests in `tests/keystore.rs` are its
+        # first direct measurement. What it meets here is decided by this
+        # machine: the list the profile hands down to directories the tests
+        # make for themselves; the account, whether its token is elevated, and
+        # the owner a directory created under the profile really gets, which
+        # is the owner the check meets; and whether a scanner is watching the
+        # disk, which is the holder R1-4 names. Printed for a reader, and
+        # nothing decides on it: `icacls`, `whoami` and `Get-Acl` localize what
+        # they print. A failure here costs the reader a premise and not the
+        # board its run.
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          icacls $env:USERPROFILE
+          whoami /user
+          whoami /groups | Select-String -Pattern 'S-1-5-32-544', 'Mandatory Label'
+          $probe = New-Item -ItemType Directory -Path (Join-Path $env:USERPROFILE 'owner-probe')
+          "owner of a new directory: $((Get-Acl $probe.FullName).Owner)"
+          Remove-Item $probe.FullName
+          Get-MpComputerStatus | Select-Object RealTimeProtectionEnabled, OnAccessProtectionEnabled
+
+      - name: ./board check
+        run: |
+          cd "$MCM"
+          ./board check
