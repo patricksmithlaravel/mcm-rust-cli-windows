@@ -1647,6 +1647,93 @@ mod census {
         }
         Ok(block.to_owned())
     }
+
+    /// The gate `tests/cli.rs` compiles its pty harness behind, as the `cfg`
+    /// attribute's tokens with the spaces taken out.
+    const PTY_GATE: &str = "cfg(all(unix,not(miri)))";
+
+    /// What a guard reports in place of the census's evidence for `target`
+    /// when this platform does not build it; `None` when it does, and the
+    /// guard asks [`check`] as it would anywhere.
+    ///
+    /// One kind of target is not built everywhere: a test in `tests/cli.rs`'s
+    /// `pty` module, whose harness drives the shipped binary through
+    /// `script(1)` and is gated to Unix because nothing else has one. On
+    /// Windows libtest lists none of that module, and a guard that asked
+    /// [`check`] there would be told something true -- nothing of that name
+    /// runs -- about a property the platform has no instrument for.
+    /// `RELEASE.md` states the gap: on Windows nothing runs the binary, and a
+    /// green board there says nothing about its console. So there the guard
+    /// reports the gap in place of evidence, rather than carrying a red that
+    /// every Windows board would show and no commit could clear.
+    ///
+    /// **The exemption asserts its own premise, and exempts the platform and
+    /// nothing else.** Where the gate does not hold, this parses
+    /// `tests/cli.rs` first and panics unless the file still declares a `pty`
+    /// module behind exactly `PTY_GATE` and still defines the target in it as
+    /// a `#[test]`. A pty test deleted, renamed, stripped of its attribute or
+    /// gated some other way is red here as it is red under [`check`] on Unix:
+    /// only its absence from the run list is excused, and only where the gate
+    /// says it is absent. A gate widened to take in Windows is red here too,
+    /// because a harness that runs there is one the census should ask about,
+    /// and this is where that decision is made.
+    pub fn not_built_here(target: &str) -> Option<String> {
+        use quote::ToTokens;
+        let name = target.strip_prefix("pty::")?;
+        // The same predicate as `PTY_GATE`, read at compile time: where it
+        // holds, the module is built and the census can ask.
+        if cfg!(all(unix, not(miri))) {
+            return None;
+        }
+        const PATH: &str = "crates/mochimo-crypto/tests/cli.rs";
+        let text = super::read_crate_file(PATH);
+        let ast = syn::parse_file(&text).unwrap_or_else(|e| panic!("syn could not parse {PATH}: {e}"));
+        let module = ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Mod(m) if m.ident == "pty" => Some(m),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{PATH} declares no `pty` module, so `{target}` is absent because the \
+                     harness is gone, not because this platform does not build it."
+                )
+            });
+        let gates: Vec<String> = module
+            .attrs
+            .iter()
+            .filter(|a| a.path().is_ident("cfg"))
+            .map(|a| a.meta.to_token_stream().to_string().replace(' ', ""))
+            .collect();
+        assert!(
+            gates == [PTY_GATE],
+            "{PATH}'s `pty` module is gated by {gates:?}, not by exactly `{PTY_GATE}`. \
+             Its absence here is excused under that gate and no other: a different \
+             gate is a different decision about where the harness runs, and it is \
+             made beside this function."
+        );
+        let defined = module.content.as_ref().is_some_and(|(_, items)| {
+            items.iter().any(|item| {
+                matches!(item, syn::Item::Fn(f)
+                    if f.sig.ident == name && f.attrs.iter().any(|a| a.path().is_ident("test")))
+            })
+        });
+        assert!(
+            defined,
+            "`{target}` is not a `#[test]` in {PATH}'s `pty` module. On Unix the census \
+             would find it missing from the run list; this platform does not build the \
+             module, so the check is made on the source, and it is missing there too."
+        );
+        Some(format!(
+            "`{target}` is not built on {}: {PATH} gates its pty harness behind \
+             `{PTY_GATE}`, and the gate and the test are both in place. What it \
+             establishes on Unix -- the shipped binary's prompts on a real terminal -- \
+             nothing that runs here establishes.",
+            std::env::consts::OS
+        ))
+    }
 }
 
 /// The census's population is libtest's run list, and this is what says so.
@@ -1696,13 +1783,30 @@ fn execution_census_population_is_libtests_run_list() {
     // ignored the gate, or the module, would spell it differently or list a
     // sibling the gate removed. Weaker than the macro witness, and said so.
     const MODULE_PATHED: &str = "pty::create_on_a_real_pty_shows_a_phrase_that_recovers_the_store";
-    assert!(
-        census::listed("cli").contains(MODULE_PATHED),
-        "`{MODULE_PATHED}` is not in the `cli` binary's run list under its \
-         module path. libtest prints a nested test as `module::name`; a \
-         census reading a parse of items rather than libtest's list would not \
-         spell it that way, and a `cfg`-removed module would not appear at all."
-    );
+    let listed = census::listed("cli").contains(MODULE_PATHED);
+    if let Some(gap) = census::not_built_here(MODULE_PATHED) {
+        // Where the gate removes the module, the witness is the same fact
+        // from the other side: the source holds the test -- the call above
+        // has just found it there, a `#[test]` behind the gate -- and libtest
+        // lists nothing of that name, where a population parsed from items
+        // would have counted it.
+        assert!(
+            !listed,
+            "`{MODULE_PATHED}` is in the census's `cli` population on a platform \
+             whose gate removes its module. libtest cannot list what was not \
+             compiled, so the population is not libtest's list: a parse of items \
+             would count it exactly like this.\n{gap}"
+        );
+        println!("  execution census witness: {gap}");
+    } else {
+        assert!(
+            listed,
+            "`{MODULE_PATHED}` is not in the `cli` binary's run list under its \
+             module path. libtest prints a nested test as `module::name`; a \
+             census reading a parse of items rather than libtest's list would not \
+             spell it that way, and a `cfg`-removed module would not appear at all."
+        );
+    }
 
     println!(
         "  execution census population: {total} tests across {} binaries \
@@ -4051,7 +4155,9 @@ fn startup_refuses_divergence_at_the_wallet_layer_not_at_the_keystore() {
     // operator can take the path it names, which a command dispatched behind
     // the refusal it is meant to act on cannot offer.
     const PTY: &str = "pty::reconcile_on_a_real_pty_takes_the_acknowledged_path_the_report_names";
-    if let Err(why) = census::check(
+    if let Some(gap) = census::not_built_here(PTY) {
+        println!("  acknowledged path: {gap}");
+    } else if let Err(why) = census::check(
         "startup_refuses_divergence_at_the_wallet_layer_not_at_the_keystore",
         PTY,
     ) {
@@ -11353,15 +11459,18 @@ fn the_cli_cannot_reach_around_the_wallet() {
             // which the harness holds at runtime by redirecting both streams
             // inside the pty and finding the phrase on neither.
             const PTY: &str = "pty::create_on_a_real_pty_shows_a_phrase_that_recovers_the_store";
-            if let Err(why) = census::check("the_cli_cannot_reach_around_the_wallet", PTY) {
+            if let Some(gap) = census::not_built_here(PTY) {
+                println!("  tty display: {gap}");
+            } else if let Err(why) = census::check("the_cli_cannot_reach_around_the_wallet", PTY) {
                 panic!(
                     "{path}: the print ban over `impl Terminal for Tty` is a text property and \
                      the thing that establishes the impl actually shows the operator anything \
                      is the pty harness -- which is not running: {PTY} must be in tests/cli.rs, \
                      run, pass and print `tty create:` with at least 6.\n{why}"
                 );
+            } else {
+                println!("  tty display: {PTY} censused, the shipped binary answered its prompts on a pty");
             }
-            println!("  tty display: {PTY} censused, the shipped binary answered its prompts on a pty");
 
             // **The domain is the file, not one impl**. The
             // ban above is scoped to `impl Terminal for Tty` because its author
@@ -11448,15 +11557,18 @@ fn the_cli_cannot_reach_around_the_wallet() {
             // for it, and a scan alone is a text property.
             const PTY_PASSWORD: &str =
                 "pty::address_on_a_real_pty_needs_no_node_and_its_prompt_survives_a_redirected_stderr";
-            if let Err(why) = census::check("the_cli_cannot_reach_around_the_wallet", PTY_PASSWORD) {
+            if let Some(gap) = census::not_built_here(PTY_PASSWORD) {
+                println!("  tty password: {gap}");
+            } else if let Err(why) = census::check("the_cli_cannot_reach_around_the_wallet", PTY_PASSWORD) {
                 panic!(
                     "{path}: the main-only print ban is a text property and the thing that \
                      establishes the shared password prompt reaches the terminal is the pty \
                      harness -- which is not running: {PTY_PASSWORD} must be in tests/cli.rs, \
                      run, pass and print `tty password:` with at least 4.\n{why}"
                 );
+            } else {
+                println!("  tty password: {PTY_PASSWORD} censused, the shared prompt reached a pty with stderr redirected");
             }
-            println!("  tty password: {PTY_PASSWORD} censused, the shared prompt reached a pty with stderr redirected");
         }
         if PRE_GATE.iter().any(|m| path.ends_with(m)) {
             pre_gate_seen += 1;
