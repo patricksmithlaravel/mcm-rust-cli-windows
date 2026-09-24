@@ -280,10 +280,23 @@ difference should be understood before the fork is cut rather than after.
 
 `phase-0` fast-forwarded into Rep-0's `main`, so `fork-point-1` still names
 the same commit, and `./board check` on that tree was green: 393 passed, 0
-failed, 0 ignored, over seventeen result lines. Rep-1 is a clone of Rep-0 at
-that tag with Rep-0 as its only remote, named `rep-0`, whose push URL is
-disabled: Rep-0 never merges from anywhere, so nothing should be able to push
-to it from here.
+failed, 0 ignored, over seventeen result lines. Rep-0's `main` and the tag are
+on GitHub as `patricksmithlaravel/mcm-rust-cli-wallet`.
+
+**Rep-1 is `patricksmithlaravel/mcm-rust-cli-windows`, and it is downstream by
+its history rather than by a badge.** It is not a GitHub fork: GitHub does not
+fork a repository into the account that already owns it -- asked through the
+API on 2026-09-22, it returned the source repository unchanged and created
+nothing. What makes it downstream is what a fork's badge would only have
+advertised: every commit up to `fork-point-1` is Rep-0's, Rep-1's `main`
+starts there, and a working clone fetches Rep-0 as `upstream`, with pushing
+to it disabled, because Rep-0 never merges from anywhere:
+
+    git remote add upstream https://github.com/patricksmithlaravel/mcm-rust-cli-wallet.git
+    git remote set-url --push upstream 'DISABLED: Rep-0 never merges from anywhere'
+
+A Rep-0 change flows down as `git fetch upstream` and a merge of
+`upstream/main`, and nothing flows back.
 
 ### The delta, measured
 
