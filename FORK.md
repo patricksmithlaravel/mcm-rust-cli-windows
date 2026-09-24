@@ -501,20 +501,30 @@ the branch is pushed alone. Its Linux and macOS jobs are coverage Rep-0 lacks
 as much as this tree does. If Rep-0 takes a workflow of its own, it is made
 there and flows down, and this file keeps only what Windows adds.
 
-**Two runs, 2026-09-24.** Each figure is summed from that job's own seventeen
-result lines, read with `gh run view <run> --job <job> --log`:
+**Three runs, 2026-09-24.** Each figure is summed from that job's own
+seventeen result lines, read with `gh run view <run> --job <job> --log`:
 
 | run | commit | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
 | 35964912554 | `1ebbcaf` | green, 393 passed | green, 393 passed | seven rows green; `test` red, 371 passed and 4 failed |
 | 35971159465 | `11da718` | green, 393 passed | green, 393 passed | green, 375 passed |
+| 36068611866 | `62fcca2` | green, 393 passed | green, 393 passed | green, 375 passed |
 
 Nothing was ignored on any platform. Windows runs eighteen fewer: the
-`pty::` tests its gate removes. The hosts were Linux 6.17 on x86_64, Darwin
-25.6 on arm64 and Windows 10.0.26100 on x86_64; the images were
-`win25-vs2026` 20260907.229.1 and `macos26` 20260907.0351.1 in both runs,
-while `ubuntu24` moved from 20260907.300.1 to 20260920.314.1 between them --
-the `-latest` trade the workflow's head makes, recorded by the run itself.
+`pty::` tests its gate removes. The third run is of the tree after Rep-0's
+`0c12e38` came down, so its Linux and macOS `pty::` tests drive the binary's
+reads through `read_scrubbed_line`, and it is the first run of the workflow's
+`msrv` job: on 1.89.0, read from the manifest's `"1.89"`, both of
+`RELEASE.md`'s commands exit 0 on all three platforms, `ring`'s C compiled on
+each. That is the per-platform MSRV check `RELEASE.md` asks for before a tag,
+green at `62fcca2`.
+
+The hosts were Linux 6.17 on x86_64, Darwin 25.6 on arm64 and Windows
+10.0.26100 on x86_64. `macos26` was 20260907.0351.1 throughout; `ubuntu24`
+moved from 20260907.300.1 to 20260920.314.1 after the first run; and within
+the third run the Windows board job had `win25-vs2026` 20260907.229.1 while
+the Windows `msrv` job had 20260922.246.2 -- the `-latest` trade the
+workflow's head makes, recorded by the runs themselves.
 
 The first run's four reds were two findings, both in the test tree and both
 fixed at their sites: three invariant guards demanded `pty::` tests that
@@ -540,12 +550,12 @@ created there is owned by the Administrators group, so the access-list check
 met that owner and never the user's own SID that an unelevated desktop would
 give it. Defender's real-time protection is off on the image, so the holder
 R1-4 names, a scanner, held nothing. Power loss is beyond any board. And
-`verify` -- the Miri run and `cargo deny` -- has not run on Windows, nor has
-the MSRV check `RELEASE.md` asks for on every platform.
+`verify` -- the Miri run and `cargo deny` -- has not run on Windows.
 
-**On Linux** the eighteen `pty::` tests pass in both runs through util-linux
-`script(1)`, the form `tests/cli.rs` describes as written from the manual and
-never run. That comment is Rep-0's, and correcting it is a Rep-0 change.
+**On Linux** the eighteen `pty::` tests pass in all three runs through
+util-linux `script(1)`, the form `tests/cli.rs` describes as written from the
+manual and never run. That comment is Rep-0's, and correcting it is a Rep-0
+change.
 
 ### R1-7 -- the surface check **(done, 2026-09-22)**
 
