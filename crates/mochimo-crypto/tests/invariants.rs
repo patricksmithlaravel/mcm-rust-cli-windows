@@ -9752,8 +9752,8 @@ fn unsafe_is_confined_to_declared_files() {
     // foreign call is the edge of what it can see -- and the Miri run is on a
     // Unix host, where the file is not compiled at all. So a green Miri run
     // says nothing about this file in either direction, and the file's own
-    // head says what does establish it: at present, a compile and clippy for
-    // the Windows target, and nothing that has run.
+    // head says what does establish it: the board on a Windows runner, whose
+    // tests go through every block, and what that run does not reach.
     //
     // The second row is the binary's Windows console, on the same two
     // grounds. `std` offers no console mode, so echo cannot be turned off
@@ -9761,17 +9761,63 @@ fn unsafe_is_confined_to_declared_files() {
     // global stdin, whose buffer lives as long as the process and is not
     // this program's to zeroize; and it has no interface to the system
     // generator. The `unsafe` sits in one `cfg(windows)` module at the foot of
-    // the file, and the Unix arm above it holds none.
-    const ALLOWED: [(&str, &str); 2] = [
+    // the file, and the row holds it there rather than to the file: the third
+    // field names the module, and the walk below requires every `unsafe` in
+    // the file to fall inside that module's braces and the module to be
+    // `cfg(windows)`. A permission for the whole file would let the Unix arm
+    // above take `unsafe` under an argument that is not about it.
+    const ALLOWED: [(&str, &str, Option<&str>); 2] = [
         (
             "crates/mochimo-crypto/src/keystore/perms/windows.rs",
             "the Windows permission model's Win32 security calls",
+            None,
         ),
         (
             "crates/mochimo-crypto/src/bin/mcm-wallet.rs",
             "the binary's Windows console and generator, in its `console` module",
+            Some("console"),
         ),
     ];
+
+    /// `Ok` when every line in `lines` falls inside the top-level module
+    /// `module` of `text`, and that module is `cfg(windows)`; otherwise the
+    /// sentence the red carries. Lines are the lexer's, and the module's
+    /// bounds are its braces' as `syn` reads them from the same text, so the
+    /// two count the same way.
+    fn confined_to_module(text: &str, module: &str, lines: &[usize]) -> Result<(), String> {
+        use quote::ToTokens;
+        let ast = syn::parse_file(text)
+            .map_err(|e| format!("does not parse ({e}), so the module its row names cannot be found"))?;
+        let m = ast
+            .items
+            .iter()
+            .find_map(|item| match item {
+                syn::Item::Mod(m) if m.ident == module => Some(m),
+                _ => None,
+            })
+            .ok_or_else(|| format!("declares no top-level `mod {module}`, the module its row confines `unsafe` to"))?;
+        let windows_only = m.attrs.iter().any(|a| {
+            a.path().is_ident("cfg") && a.meta.to_token_stream().to_string().replace(' ', "") == "cfg(windows)"
+        });
+        if !windows_only {
+            return Err(format!(
+                "declares `mod {module}` without `#[cfg(windows)]`, and its row is argued as the Windows boundary"
+            ));
+        }
+        let Some((brace, _)) = &m.content else {
+            return Err(format!("declares `mod {module}` with no body in this file, so its lines cannot be read"));
+        };
+        let (open, close) = (brace.span.open().start().line, brace.span.close().end().line);
+        let outside: Vec<usize> = lines.iter().copied().filter(|l| *l < open || *l > close).collect();
+        if outside.is_empty() {
+            Ok(())
+        } else {
+            Err(format!(
+                "contains `unsafe` at line(s) {outside:?}, outside `mod {module}` (lines {open} to {close}), \
+                 the one module its row allows it in"
+            ))
+        }
+    }
 
     fn count_unsafe(stream: proc_macro2::TokenStream, lines: &mut Vec<usize>) {
         for tree in stream {
@@ -9802,8 +9848,15 @@ fn unsafe_is_confined_to_declared_files() {
         count_unsafe(stream, &mut lines);
         files += 1;
 
-        match ALLOWED.iter().find(|(f, _)| *f == name) {
-            Some(_) => per_allowed.push((name, lines.len())),
+        match ALLOWED.iter().find(|(f, _, _)| *f == name) {
+            Some((_, _, scope)) => {
+                if let Some(module) = scope {
+                    if let Err(why) = confined_to_module(&text, module, &lines) {
+                        problems.push(format!("\x20 - {name} {why}."));
+                    }
+                }
+                per_allowed.push((name, lines.len()));
+            }
             None if lines.is_empty() => {}
             None => {
                 let miri_note = if name.ends_with("backend/native.rs") {
@@ -9828,7 +9881,7 @@ fn unsafe_is_confined_to_declared_files() {
     // The other direction: an allow-listed file with zero occurrences means
     // the row is stale, and a stale row is a standing permission nobody is
     // using -- exactly what a later session would exploit by accident.
-    for (file, why) in ALLOWED {
+    for (file, why, _) in ALLOWED {
         match per_allowed.iter().find(|(f, _)| f == file) {
             None => problems.push(format!(
                 "\x20 - allow-listed file {file} was not walked at all; the \

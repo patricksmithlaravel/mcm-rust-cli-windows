@@ -217,7 +217,7 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | `error.rs` | `UnsafeAcl` and `ReplaceRefused`, both `cfg(windows)` | the evidence a Windows refusal carries has no Unix shape, and `UnsafePermissions`' `mode` would have to be invented to carry it |
 | `crates/mochimo-crypto/Cargo.toml` | `windows-sys`, a `cfg(windows)` dependency | the declarations the two Windows arms call |
 | `README.md`, `docs/specification.md` | the platform statements, and the Windows limits an operator must know -- no power-loss flush, a rename another program can refuse | they describe a Windows build Rep-0 does not have |
-| `tests/invariants.rs` | two rows in `unsafe_is_confined_to_declared_files` -- the permission model and the binary's console -- and `from_raw_os_error` in the declared unresolved names | neither the Win32 security API nor the console mode has a `std` wrapper, so both are foreign calls or nothing |
+| `tests/invariants.rs` | two rows in `unsafe_is_confined_to_declared_files` -- the permission model, and the binary's console, held to its `cfg(windows)` `console` module -- and `from_raw_os_error` in the declared unresolved names | neither the Win32 security API nor the console mode has a `std` wrapper, so both are foreign calls or nothing |
 | `tests/invariants.rs` | `the_unix_surface_is_confined_to_the_files_a_port_would_touch` lists the files the port touched, per needle, where upstream lists the four a port would | it is the record of the port; the test keeps its upstream name so that upstream edits to it still merge |
 | `tests/invariants.rs` | its five source walks name files with `/` on every platform | on Windows a relative path joins with `\`, and forty-odd name literals would stop matching |
 | `tests/invariants.rs` | the census's three demands on `pty::` tests, and the run-list witness that names one, are answered where the harness is not built by `census::not_built_here`, which asserts that `tests/cli.rs` still declares the harness behind exactly `cfg(all(unix, not(miri)))` with the test in it; the guard then reports the gap in place of evidence | the harness is `script(1)`, which Windows does not have, so the demand cannot be met there; it is replaced by a check of the declared absence rather than dropped, and on Unix nothing changes |
@@ -407,6 +407,18 @@ one another user owns. The refusal is a new `cfg(windows)` variant,
 `unsafe_is_confined_to_declared_files` refused until it was given a row with
 the argument its comment asks for.
 
+**Reviewed and accepted, 2026-09-24.** All twenty-four `unsafe` blocks --
+eighteen here and six in the binary's console -- were read against
+Microsoft's documented contract for each call, and every SAFETY condition
+holds. Three blocks here rested on more than they needed to and were narrowed
+in `5cfed2e`: two descriptors taken into ownership before their call was known
+to have succeeded, a SID pointer derived through a reference narrower than
+the SID, and a raw pointer into a descriptor that no lifetime tied to it. The
+allow-list's console row is held to its module by the commit that records
+this. Of the twenty-four, these eighteen are what the Windows board goes
+through, and it has run them as they stood before `5cfed2e`; the narrowed
+version has not run, and the console's six have not run at all.
+
 `windows-sys` is **already in `Cargo.lock`** (two versions, through the
 transport's graph), and `deny.toml` leaves `targets` unset deliberately so the
 licence walk already reaches it. A direct dependency on it adds no crate and no
@@ -470,6 +482,11 @@ The shipped binary, TLS and all, builds natively on a Windows runner: the
 `build: shipped` and `clippy: mesh-https` rows are green there, `ring`'s C
 compiled by the image's MSVC. Nothing runs it, so the console, its echo
 handling and `BCryptGenRandom` are established by nothing that executes.
+
+The console module's six `unsafe` blocks were reviewed with the permission
+arm's (R1-2) and needed no change. `unsafe_is_confined_to_declared_files`
+holds them to that module: its row names `console`, and an `unsafe` anywhere
+else in the binary, or the module losing its `cfg(windows)`, is red.
 
 ### R1-6 -- the board **(done, 2026-09-22; green on all three platforms, 2026-09-24)**
 
