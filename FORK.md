@@ -501,6 +501,14 @@ arm's (R1-2) and needed no change. `unsafe_is_confined_to_declared_files`
 holds them to that module: its row names `console`, and an `unsafe` anywhere
 else in the binary, or the module losing its `cfg(windows)`, is red.
 
+**A `Ctrl-Z` ends console input only when it begins a line** -- decided
+2026-09-24 and made in `7ca154d`. `Console::read` took one that began any
+read as the end, so with the 512-byte chunks `read_scrubbed_line` offers, a
+`Ctrl-Z` typed as a line's 170th character cut the line there. `Console` now
+tracks whether its next read begins a line, and nothing Rep-0 owns moved. The
+changed module has compiled natively on a Windows runner, in the fifth run
+below, and has not run.
+
 ### R1-6 -- the board **(done, 2026-09-22; green on all three platforms, 2026-09-24)**
 
 `./board` is a POSIX shell script. `RELEASE.md` asks for green on two platforms
@@ -531,7 +539,7 @@ the branch is pushed alone. Its Linux and macOS jobs are coverage Rep-0 lacks
 as much as this tree does. If Rep-0 takes a workflow of its own, it is made
 there and flows down, and this file keeps only what Windows adds.
 
-**Four runs, 2026-09-24.** Each figure is summed from that job's own
+**Five runs, 2026-09-24.** Each figure is summed from that job's own
 seventeen result lines, read with `gh run view <run> --job <job> --log`:
 
 | run | commit | Linux | macOS | Windows |
@@ -540,6 +548,7 @@ seventeen result lines, read with `gh run view <run> --job <job> --log`:
 | 35971159465 | `11da718` | green, 393 passed | green, 393 passed | green, 375 passed |
 | 36068611866 | `62fcca2` | green, 393 passed | green, 393 passed | green, 375 passed |
 | 36073146927 | `7e45af7` | green, 393 passed | green, 393 passed | green, 375 passed |
+| 36091463164 | `7ca154d` | green, 393 passed | green, 393 passed | green, 375 passed |
 
 Nothing was ignored on any platform. Windows runs eighteen fewer: the
 `pty::` tests its gate removes. The third run is of the tree after Rep-0's
@@ -551,14 +560,18 @@ each. That is the per-platform MSRV check `RELEASE.md` asks for before a tag,
 green at `62fcca2`. The fourth runs the permission arm as the review of its
 `unsafe` narrowed it in `5cfed2e`, and the allow-list with the binary's row
 held to its console module: both are green on Windows, and the `msrv` job is
-green again on all three.
+green again on all three. The fifth runs the console that takes a `Ctrl-Z`
+as the end of input only at a line's start, R1-5's decision: the Windows
+`clippy: mesh-https` and `build: shipped` rows compiled the changed module
+natively, and the `msrv` job is green on all three once more.
 
 The hosts were Linux 6.17 on x86_64, Darwin 25.6 on arm64 and Windows
 10.0.26100 on x86_64. `macos26` was 20260907.0351.1 throughout; `ubuntu24`
 moved from 20260907.300.1 to 20260920.314.1 after the first run; and within
 each of the third and fourth runs the Windows board job had `win25-vs2026`
-20260907.229.1 while the Windows `msrv` job had 20260922.246.2 -- the
-`-latest` trade the workflow's head makes, recorded by the runs themselves.
+20260907.229.1 while the Windows `msrv` job had 20260922.246.2, where in the
+fifth both had 20260907.229.1 -- the `-latest` trade the workflow's head
+makes, recorded by the runs themselves.
 
 The first run's four reds were two findings, both in the test tree and both
 fixed at their sites: three invariant guards demanded `pty::` tests that
