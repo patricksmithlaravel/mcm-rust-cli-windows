@@ -456,8 +456,280 @@ powered off hard, which no hosted runner can do. The other removes the
 dependence instead of measuring it: on Windows, write each new version into
 one of two files that already exist -- alternating slots with a sequence
 number, flushed in place with `FlushFileBuffers`, which is documented -- so no
-directory entry is left to lose. The second is unevaluated; it changes how
-the store is written on Windows and would owe a crash argument of its own.
+directory entry is left to lose. The second is designed below and has not
+been approved; it changes how the store is written on Windows, and the design
+is the crash argument it owes.
+
+#### Route A, designed: two slots written in place **(2026-09-24; not approved, and no code)**
+
+The second route above, carried as far as a design can be judged without
+code. Nothing in it has been built or run. Every claim it makes about Windows
+is read from Microsoft's documentation or `std`'s source, and says which.
+
+**What it would establish.** Once `Durable` is minted on Windows, no power
+cut or operating-system crash can make a later `open` return a state older
+than the one that commit wrote -- the claim the Unix path makes with its
+directory flush. It gets there by taking every directory entry off a commit's
+path: once a store's two files exist, a commit writes one of them in place
+and flushes it, and nothing is created, renamed or deleted. The one call it
+rests on is `FlushFileBuffers`, in the two uses Microsoft documents for it:
+putting a file's written data on the device, and storing a file's metadata,
+for which the documentation's own example is a file just created. The rest
+is this tree's code, and the part a power cut exercises -- what `open` makes
+of a slot left torn -- can be tested by fault injection.
+
+**The layout.** Two slot files beside the lock: `accounts.mks`, slot 0, and
+`accounts.mks.1`, slot 1. Each holds one frame and nothing after it:
+
+    magic[8] = "MCMKSLOT" | frame_version u16 = 1 | image_len u32 (0: vacant)
+    | image[image_len]   one whole image in `format`'s layout, unchanged
+    | check[32]          SHA3-256 over every byte before it
+
+A slot's file length is `46 + image_len`, and a slot whose length disagrees
+with its frame is torn. The image is what `format::encode` seals today --
+header, ciphertext and tag -- so **`format.rs` does not change**, and every
+rule it enforces holds inside a slot. Slot 0 keeps the snapshot's name, so
+`open` still reports `Missing` from one name, and a build that reads only the
+plain image -- Rep-0's, and this tree's own on Unix -- refuses a slot at its
+magic, as `Corrupt` at `magic` (or, for a store at the account cap, at its
+length), instead of reading a stale snapshot, and refuses to `create` over it.
+
+**The sequence number is the image's generation, and it stays encrypted.**
+Format version 3 moved `generation` into the ciphertext so that a stolen file
+does not say how often it was written. A plaintext counter in the frame would
+undo that, and one short enough to say nothing would be too short to order
+two slots, so the frame carries none: `open` orders the slots by decrypting
+both. The key is derived once, from an intact frame's header when there is
+one, because every generation of a store is sealed under one salt; two intact
+slots whose headers disagree on the salt or the KDF parameters are refused,
+since this writer never makes that pair.
+
+**The check is keyless, on purpose.** The tag refuses a torn image too, but
+only once a key exists, and it cannot say whether an image was torn or
+altered -- by design, as `WrongPassword`'s doc argues. The check sorts the
+slots before any key is derived. A frame whose check fails is torn, which is
+what a crash leaves, and it is never a refusal while the other slot holds an
+image. A frame whose check passes and whose tag then fails is sealed under
+another key or altered -- no crash makes one -- and it is refused as
+`WrongPassword`, as a damaged snapshot is today; one whose parse fails is
+refused with the parser's own error. SHA3-256 is already the crate's own, for
+the nonce, so the check adds no dependency.
+
+**Open.** As today up to the lock and the stale temp. Then both slots are
+read, and each is one of: *absent* (slot 1 only), *vacant*, *torn*, an
+*intact* frame, or -- slot 0 only -- a *plain* image, which is what every
+store is until its first Windows commit. Intact frames holding an image are
+candidates. A plain slot 0 is read exactly as today while slot 1 holds no
+intact frame; beside one, it is a candidate if it decrypts and parses, and
+otherwise it is the torn remainder of an overwrite -- a plain image is
+overwritten only after slot 1 holds a flushed frame -- and not a refusal.
+`open` takes the candidate with the higher generation as the newest, and
+names the other slot, whatever it holds, as the next commit's target. It
+refuses a store with no candidate, two candidates at one generation, and a
+frame in slot 0 with no slot 1 beside it, which only a deletion leaves: a
+silent step back to the older image is otherwise how a deleted file would
+show.
+
+It holds both slots open for the handle's life, sharing read access only.
+While a handle lives no other process can then write, rename or delete a
+slot, which is the one way a flushed write could stop being the file the next
+`open` reads; and a program already holding a slot without sharing write --
+the scanner R1-4 names -- is refused by name at `open`, before anything is
+reserved, rather than at a commit that then poisons the handle. `open` still
+writes nothing.
+
+**Commit.** Two steps, each consuming the token the one before it produced,
+as the four do on Unix: `write_slot` writes the frame into the target at
+offset 0 and sets the file's length to the frame's, and `flush_slot` is
+`FlushFileBuffers` on the target, which is what `std`'s `sync_all` calls on
+Windows, read in its Windows `fs` source. Then `Durable`. Two rules frame
+them. The target is never the slot holding the newest image. And a handle's
+first commit begins by flushing the newest slot as it found it, so that a
+slot is overwritten only while the other is known to be on the device: after
+a flush that failed, a later process can read a newer slot out of the cache
+although it never reached the disk, and overwriting the older slot then would
+leave a power cut nothing to go back to.
+
+**A crash at every step.** On this path a kill and a power cut differ in one
+respect: a power cut can also undo an unflushed write -- all of it, or any mix
+of old and new sectors, at the old length or the new -- and an unflushed
+creation. The other slot is not written, so it is not in play:
+
+| the crash comes | the target holds | `open` takes | allowed because |
+| --- | --- | --- | --- |
+| before `write_slot` | what it held | the newest: pre | nothing new was written |
+| once `write_slot` has begun, before `flush_slot` returns | the old image, the new, or a mix | the new image if the target is intact, else the newest: post or pre | no receipt exists for the new image, so taking it skips a position and never repeats one |
+| after `flush_slot` returns | the new image, on the device | the new image: post | the documented flush |
+| after `Durable` | the same | post | the next commit writes the other slot |
+
+**Power loss.** What holds the third row is that a flush which returned is on
+the device. Microsoft documents it from three sides: `FlushFileBuffers`
+writes all of a file's buffered information to the device; the *File
+Caching* page says file-system metadata is always cached and that flushing
+the file is how its changes are stored; and the WDK documents a flush request
+in its normal form as writing the file's data and metadata and then having
+the storage flush its own cache, on NTFS, ReFS, FAT and exFAT -- the last two
+of which the permission check already refuses a store on. What no document
+can say is that a device honours the flush it is sent: storage that
+acknowledges one it did not perform defeats this path as an `fsync` that lies
+defeats the Unix one, and it is the same stated residue.
+
+**Create, and the one directory entry each slot has.** Creating a slot writes
+a directory entry, and it is stored the documented way: `CreateFile`'s
+section on caching, in its paragraph on unbuffered handles, gives "creating
+an empty file" as its example of metadata that may still be cached and
+`FlushFileBuffers` as how to make sure it reaches the disk, and the *File
+Caching* page says the same of all metadata. `create` writes slot 1 first --
+the store's first image, in a file created under the protected list, then
+flushed -- and only then `accounts.mks`, a vacant frame, flushed. So the
+snapshot's name existing means an image is on the device, on Windows as on
+Unix. A power cut inside `create` leaves at most an `accounts.mks.1` with no
+`accounts.mks`: `open` calls that `Missing`, and on Windows `create` refuses
+it by name rather than overwrite it, because it can also be the last copy of
+a store whose `accounts.mks` was deleted by hand. Once a store has both slots,
+no file is created again.
+
+**Migration from the rename layout.** Two kinds of store reach this path
+with a plain `accounts.mks`: one that a build of this tree made on Windows
+before the change -- a development build, since no tag is cut while the gate
+this closes stands -- and one copied from Linux or macOS. `open` reads it as
+today. Its first commit is the one that differs: it writes the next image
+into slot 1, creating it, and flushes it; then it overwrites `accounts.mks`
+in place with a vacant frame and flushes that; and only then is `Durable`
+minted. From that commit on, a build that reads only the plain image refuses
+the store at its magic. A crash inside it leaves slot 1 absent, torn or
+intact beside the plain image or its torn remainder, and the rules above take
+the plain image until slot 1 is intact, and slot 1 from then on. The
+version-3 crossing is separate and still happens at the first commit. The
+residue: a crash between that commit's two flushes, followed by a build that
+reads only the plain image opening the directory -- on Unix, or a Windows
+build from before the change -- which would read the plain image and not the
+newer slot.
+
+**The lock and `Durable`.** The lock does not change: `keystore.lock` under
+`LockFileEx`, taken before anything is read and held for the handle's life.
+`Durable` is still constructed at one expression, the `Ok` arm of
+`Keystore::commit`: `durable_witness_has_one_construction_site` counts
+constructions in the source whatever their `cfg`, so the Windows steps return
+into that arm rather than minting in one of their own. What it witnesses on
+Windows becomes the Unix claim -- the image is on the device, in a slot the
+next `open` takes over every older one. Poisoning does not change: any failed
+step poisons the handle, and the next `open` reads both slots again.
+
+**Unix does not change.** The rename path, its four steps and their
+typestate, the proofs driven through them and the trybuild case pinning their
+order stay as upstream has them, which keeps every Rep-0 change to them
+merging. Rep-0 would refuse this path on its own terms, since Unix has the
+directory flush it exists to do without. A store therefore moves from Unix to
+Windows by copying its directory, and its first Windows commit migrates it;
+one copied from Windows to Unix is refused there at the magic -- fail-closed,
+and a limit the README would state, since moving a store that way needs a
+conversion this design does not provide.
+
+**Tests, through `Instrumented`.**
+
+* *On every board.* The frame codec and `open`'s choice are pure functions of
+  bytes and a key, so their tests run everywhere: every truncation and every
+  single-byte change of a frame; an old frame and a new one mixed at 512-byte
+  granularity, both ways round; and every pair of slot states -- absent,
+  vacant, torn, plain, and intact one generation behind, level and ahead --
+  asserting what `open` takes or refuses for each. That is the table above,
+  enumerated rather than argued.
+* *On the Windows runner.* `Instrumented` records the two steps with their
+  arguments and stops after either, as it does now, and gains a torn
+  injection: before returning its error it leaves the target holding a chosen
+  mix of old and new bytes, at the old length or the new, or leaves no file
+  where one was being created. The I3 proof's Windows arm drives every step
+  and every mix over the commits it walks and finds every member fully pre or
+  fully post, and post once `flush_slot` has returned; the I2 proof's finds no
+  receipt escaping; `create` and the migrating commit are walked the same way.
+  Both proofs keep their names, so the census asks for them on Windows as on
+  Unix, and I3's floor of four is met by two steps over two commits before a
+  single mix is counted.
+* *By documentation alone*: that a flush which returned survives a power cut.
+  No injection can model that, since it is the premise the injections are
+  conditioned on; Route B's measurement is what would add evidence to it.
+
+`tests/cli.rs` does not change. Its tests that run on Windows -- everything
+outside the `pty` module -- compare `snapshot_bytes()` before and after a
+command, ask whether `accounts.mks` exists, and in one case write a version-3
+image and read the version word of the image its first write produced. The
+harness's `snapshot_bytes()` gains a Windows arm returning the newest image,
+and `write_snapshot()` one that leaves a store in the rename layout holding
+exactly the bytes given -- which is what putting bytes back for the arms that
+damage a file on purpose means once a store has two files.
+Tests that assert the four-step sequence, among them
+`medium_sequence_is_exactly_the_four_steps_with_their_arguments` and
+`poisoned_handle_refuses_to_launder_a_rollback`, become Unix-only beside
+Windows twins, and R1-4's held-snapshot test becomes a held-slot test,
+refused at `open`.
+
+**The delta.** `medium.rs` and `keystore/mod.rs` carry the path, and both are
+Rep-1's to change. The frame and `open`'s choice are a new file, compiled on
+Windows and under `cfg(test)` everywhere, so that its tests run on every board
+and no platform compiles code it never calls: a permanent delta, with a row.
+`error.rs`'s Windows variants change inside their row -- `ReplaceRefused`
+names a rename that no longer happens, and its refusal moves to `open` -- and
+so do the test rows: the proofs' Windows arms, the census floor's comment,
+the harness's arms and the twins. `format.rs`, `recon.rs` and `src/cli/` do
+not change, and nothing is asked of Rep-0. One question of shape is left to
+the implementing commit, because it is about merge cost and not about
+correctness: whether Windows' `Medium` is a trait of its own, which keeps
+every step's name true and costs a per-platform registration of the order pin
+in `tests/compile_fail.rs`, or the Unix trait with the slot steps added under
+`cfg(windows)`, which leaves the pin alone and the four rename steps compiled
+on Windows with nothing to call them. The first is recommended.
+
+**Weighed, and refused.**
+
+* `ReplaceFileW` with `REPLACEFILE_WRITE_THROUGH`: Microsoft documents that
+  flag as not supported.
+* `MoveFileExW` with `MOVEFILE_WRITE_THROUGH`: weighed at `fsync_dir`
+  already; the guarantee its page gives is stated for a move performed as a
+  copy and a delete.
+* Transactional NTFS: Microsoft recommends other means and says it may not be
+  in future versions of Windows.
+* Slots preallocated at `MAX_IMAGE_LEN`, so that no write changes a length:
+  12,779,632 bytes a slot for a store that holds a handful of accounts, to
+  save a metadata change the flush stores anyway.
+* A plaintext frame counter: above.
+* **Route B's second candidate, which reads better than its site says.** The
+  *File Caching* page says flushing a file stores its metadata changes, and
+  `CreateFile`'s caching section counts a rename among a file's metadata
+  changes. Read together they say more for flushing the snapshot after the
+  rename than `fsync_dir`'s refusal credits, and a temp whose handle is held
+  through the rename could be flushed without the reopen's fresh chance of a
+  sharing refusal. It is still an inference across two pages; it leaves
+  unsaid whether the replaced target's entry is among the renamed file's
+  metadata; and it keeps the reliance on the replacing move being atomic,
+  which Win32 does not document. Route A needs none of that. It is a few lines
+  against a new layout, though, and an improvement on a step that flushes
+  nothing -- but it neither removes the dependence on the rename nor measures
+  it, so by `RELEASE.md`'s own wording it does not close the gate alone. The
+  same pages also make the tree's general sentence that Win32 documents no
+  call committing a directory entry on NTFS -- in `RELEASE.md`, the
+  specification and the keystore's crash section -- stronger than the
+  documentation: it documents one for a file just created, which is what this
+  design uses.
+
+**Not established, here as on the path it replaces.** The store directory's
+own entry in its parent is flushed by nothing, on Windows or on Unix, so a
+power cut before the file system commits the directory's creation can take
+the whole store with it, and any reservation made in it meanwhile. It is a
+gap in both platforms' statements, and stating it is Rep-0's first. A device
+that does not honour a flush. And all of the above is unbuilt.
+
+**When it is built, every statement of the hazard changes with it**:
+`medium.rs`'s module doc and `fsync_dir`'s Windows arm; the keystore's crash
+section, its storage-gate comment and `Durable`'s doc; the README's platform
+line and its two Windows limits; the specification's file table, its section
+on how a file is replaced, and I3's limit; `RELEASE.md`'s gate and its
+paragraph on the directory flush; and R1-3, R1-4 and the delta table here.
+
+**What approval settles**: Route A as designed, or Route B's cheaper
+candidate first; the two names and the frame; that a store copied from
+Windows to Unix is refused rather than converted; the shape of the trait; and
+the first-commit flush, which costs a committing command one more flush.
 
 ### R1-4 -- rename under a sharing violation **(done, 2026-09-22; measured on a Windows runner, 2026-09-24)**
 
