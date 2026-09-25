@@ -9491,6 +9491,38 @@ const DECLARED_PANIC_SITES: &[(&str, &str, usize, &str)] = &[
          returned from `encode`.",
     ),
     (
+        "crates/mochimo-crypto/src/keystore/slots.rs",
+        "panic!",
+        11,
+        "inside the #[cfg(test)] module: `unwrap_or_else(|e| panic!(..))` on the \
+         steps that must succeed around what is under test -- sealing an image, \
+         deriving its key, framing, sorting and taking -- and the arm of each of \
+         two matches that names a sort that is neither an image nor torn. The \
+         module's non-test code contains no panicking construct: its reads are \
+         `get` and `split_at` on lengths already checked, its six constant \
+         indexes are into a slice of exactly that many bytes and argue it where \
+         they stand, and every failure is a Result.",
+    ),
+    (
+        "crates/mochimo-crypto/src/keystore/slots.rs",
+        "assert!",
+        11,
+        "same #[cfg(test)] module: the image back out of its frame, the vacant \
+         and absent sorts, every cut and every one-bit change of a frame sorting \
+         as torn, the sector-mix walk's floor and its two verdicts, the refused \
+         later frame version, and the key `take` hands back.",
+    ),
+    (
+        "crates/mochimo-crypto/src/keystore/slots.rs",
+        "assert_eq!",
+        13,
+        "same #[cfg(test)] module: the forty-six-byte overhead its doc states, \
+         two frame lengths, three walk counts, each of the forty-nine pairs in \
+         the table of slot states against what `take` must make of it, the \
+         version, salt and parameters `take` hands back, and the wrong-password \
+         and two-salt refusals.",
+    ),
+    (
         "crates/mochimo-crypto/src/derive.rs",
         "assert!",
         8,

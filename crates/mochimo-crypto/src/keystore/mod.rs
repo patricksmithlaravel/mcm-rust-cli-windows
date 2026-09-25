@@ -174,6 +174,8 @@ pub mod format;
 pub mod medium;
 pub(crate) mod perms;
 pub mod sign;
+#[cfg(test)]
+mod slots;
 pub mod spend;
 
 use std::collections::BTreeMap;

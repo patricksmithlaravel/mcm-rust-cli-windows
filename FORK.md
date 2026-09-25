@@ -214,10 +214,12 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | file | the delta | why it cannot be a Rep-0 change |
 | --- | --- | --- |
 | `keystore/perms/windows.rs` | the Windows permission model, a new file | it is the Windows arm; a separate file so `perms.rs` stays the Unix arm and upstream edits to it merge without meeting Windows code |
+| `keystore/slots.rs` | the Windows layout's frame, and the rule by which `open` takes the newer of two slots -- a new file, compiled under `cfg(test)` on every platform | the layout exists because Win32 documents no way to commit a rename, which is Windows' alone; a file of its own so the rule is tested on every board and none of it is Windows code in `medium.rs` or `keystore/mod.rs` |
 | `error.rs` | `UnsafeAcl` and `ReplaceRefused`, both `cfg(windows)` | the evidence a Windows refusal carries has no Unix shape, and `UnsafePermissions`' `mode` would have to be invented to carry it |
 | `crates/mochimo-crypto/Cargo.toml` | `windows-sys`, a `cfg(windows)` dependency | the declarations the two Windows arms call |
 | `README.md`, `docs/specification.md` | the platform statements, and the Windows limits an operator must know -- no power-loss flush, a rename another program can refuse | they describe a Windows build Rep-0 does not have |
 | `tests/invariants.rs` | two rows in `unsafe_is_confined_to_declared_files` -- the permission model, and the binary's console, held to its `cfg(windows)` `console` module -- and `from_raw_os_error` in the declared unresolved names | neither the Win32 security API nor the console mode has a `std` wrapper, so both are foreign calls or nothing |
+| `tests/invariants.rs` | three rows in `DECLARED_PANIC_SITES` for `keystore/slots.rs`'s tests | the census counts every file under `crates/*/src`, and that file is this tree's |
 | `tests/invariants.rs` | `the_unix_surface_is_confined_to_the_files_a_port_would_touch` lists the files the port touched, per needle, where upstream lists the four a port would | it is the record of the port; the test keeps its upstream name so that upstream edits to it still merge |
 | `tests/invariants.rs` | its five source walks name files with `/` on every platform | on Windows a relative path joins with `\`, and forty-odd name literals would stop matching |
 | `tests/invariants.rs` | the census's three demands on `pty::` tests, and the run-list witness that names one, are answered where the harness is not built by `census::not_built_here`, which asserts that `tests/cli.rs` still declares the harness behind exactly `cfg(all(unix, not(miri)))` with the test in it; the guard then reports the gap in place of evidence | the harness is `script(1)`, which Windows does not have, so the demand cannot be met there; it is replaced by a check of the declared absence rather than dropped, and on Unix nothing changes |
@@ -456,15 +458,16 @@ powered off hard, which no hosted runner can do. The other removes the
 dependence instead of measuring it: on Windows, write each new version into
 one of two files that already exist -- alternating slots with a sequence
 number, flushed in place with `FlushFileBuffers`, which is documented -- so no
-directory entry is left to lose. The second is designed below and has not
-been approved; it changes how the store is written on Windows, and the design
-is the crash argument it owes.
+directory entry is left to lose. The second is designed below, approved,
+and being built; it changes how the store is written on Windows, and the
+design is the crash argument it owes.
 
-#### Route A, designed: two slots written in place **(2026-09-24; not approved, and no code)**
+#### Route A, designed: two slots written in place **(approved, 2026-09-24; the reading rule built, the write path not yet)**
 
 The second route above, carried as far as a design can be judged without
-code. Nothing in it has been built or run. Every claim it makes about Windows
-is read from Microsoft's documentation or `std`'s source, and says which.
+code; what of it is built, and what has run, is said at the section's foot.
+Every claim it makes about Windows is read from Microsoft's documentation or
+`std`'s source, and says which.
 
 **What it would establish.** Once `Durable` is minted on Windows, no power
 cut or operating-system crash can make a later `open` return a state older
@@ -481,13 +484,18 @@ of a slot left torn -- can be tested by fault injection.
 **The layout.** Two slot files beside the lock: `accounts.mks`, slot 0, and
 `accounts.mks.1`, slot 1. Each holds one frame and nothing after it:
 
-    magic[8] = "MCMKSLOT" | frame_version u16 = 1 | image_len u32 (0: vacant)
-    | image[image_len]   one whole image in `format`'s layout, unchanged
-    | check[32]          SHA3-256 over every byte before it
+    magic[8] = "MCMKSLOT" | frame_version u16 = 1 | payload_len u32
+    | payload[payload_len]   version 1: one image in `format`'s layout,
+                             unchanged, or nothing for the vacant frame
+    | check[32]              SHA3-256 over every byte before it
 
-A slot's file length is `46 + image_len`, and a slot whose length disagrees
-with its frame is torn. The image is what `format::encode` seals today --
-header, ciphertext and tag -- so **`format.rs` does not change**, and every
+A slot's file length is `46 + payload_len`, and a slot whose length disagrees
+with its frame is torn. Only the payload is versioned: the magic, the version,
+the length and the check keep their places in every frame version, so an older
+build can still verify a later frame's check and refuse it, where a later
+version free to move the check would have that build call the slot torn and
+take the older one beside it. The image is what `format::encode` seals today
+-- header, ciphertext and tag -- so **`format.rs` does not change**, and every
 rule it enforces holds inside a slot. Slot 0 keeps the snapshot's name, so
 `open` still reports `Missing` from one name, and a build that reads only the
 plain image -- Rep-0's, and this tree's own on Unix -- refuses a slot at its
@@ -726,10 +734,19 @@ line and its two Windows limits; the specification's file table, its section
 on how a file is replaced, and I3's limit; `RELEASE.md`'s gate and its
 paragraph on the directory flush; and R1-3, R1-4 and the delta table here.
 
-**What approval settles**: Route A as designed, or Route B's cheaper
-candidate first; the two names and the frame; that a store copied from
-Windows to Unix is refused rather than converted; the shape of the trait; and
-the first-commit flush, which costs a committing command one more flush.
+**What approval settled, 2026-09-24**: Route A as designed rather than Route
+B's cheaper candidate first; the two names and the frame; that a store copied
+from Windows to Unix is refused rather than converted; Windows' `Medium` as a
+trait of its own; and the first-commit flush, which costs a committing command
+one more flush.
+
+**The reading rule is built first**, in `keystore/slots.rs`: the frame, how a
+slot file is sorted before any key exists, and `take`, which is `open`'s
+choice between the two. It is compiled under `cfg(test)` on every platform,
+so the rule is tested on every board -- every cut and every one-bit change of
+a frame, every sector-by-sector mix of an old frame and a new one at both
+lengths, and each of forty-nine pairs of slot states against what `take` must
+make of it -- before any Windows code calls it.
 
 ### R1-4 -- rename under a sharing violation **(done, 2026-09-22; measured on a Windows runner, 2026-09-24)**
 
