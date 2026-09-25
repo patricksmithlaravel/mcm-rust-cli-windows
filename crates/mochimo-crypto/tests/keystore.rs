@@ -859,10 +859,12 @@ fn medium_sequence_is_exactly_the_four_steps_with_their_arguments() {
 /// steps, on the slot that does not hold the newest image, with the frame's
 /// length -- forty-six bytes over the image's.
 ///
-/// `create` writes slot 1 and then slot 0's vacant frame; a handle's later
-/// commits alternate; and a handle opened on a store flushes the newest slot
-/// as it found it before its first write, which a handle that wrote the
-/// store itself has no need to.
+/// `create` first names the store directory's parent to `fsync_parent`, a
+/// call Windows answers with nothing flushed and `Instrumented` records so
+/// the sequence keeps Unix's shape, and then writes slot 1 and slot 0's
+/// vacant frame; a handle's later commits alternate; and a handle opened on
+/// a store flushes the newest slot as it found it before its first write,
+/// which a handle that wrote the store itself has no need to.
 #[cfg(windows)]
 #[test]
 fn medium_sequence_is_exactly_the_slot_steps_with_their_arguments() {
@@ -870,17 +872,19 @@ fn medium_sequence_is_exactly_the_slot_steps_with_their_arguments() {
     let dir = ScratchDir::new("sequence");
     let slot0 = dir.path().join("accounts.mks");
     let slot1 = dir.path().join("accounts.mks.1");
+    let parent = dir.path().parent().unwrap_or_else(|| panic!("a scratch directory has a parent")).to_path_buf();
     let mut ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init()).unwrap_or_else(|e| panic!("{e}"));
     let len = OVERHEAD + read_snapshot(&dir).len();
     assert_eq!(
         ks.medium().calls(),
         &[
+            Call::FsyncParent { dir: parent },
             Call::WriteSlot { path: slot1.clone(), len },
             Call::FlushSlot { path: slot1.clone() },
             Call::WriteSlot { path: slot0.clone(), len: OVERHEAD },
             Call::FlushSlot { path: slot0.clone() },
         ],
-        "create is slot 1's image and then slot 0's vacant frame, each flushed"
+        "create is the parent named, then slot 1's image and then slot 0's vacant frame, each flushed"
     );
     ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
     ks.medium_mut().reset_calls();
@@ -906,6 +910,42 @@ fn medium_sequence_is_exactly_the_slot_steps_with_their_arguments() {
         ],
         "a reopened handle's first commit does not flush the newest slot before writing the other"
     );
+}
+
+/// **`create` flushes the store directory's parent, once, before its first
+/// commit**, whether it made the directory or found it. The sequence a fresh
+/// `create` records is that flush, naming the directory that holds the store,
+/// and then the commit's four steps unchanged. The parent's path is the
+/// argument that matters: a flush of the store directory in its place would
+/// keep the count at five and show only here.
+///
+/// Unix's form: the steps after the flush are the rename layout's. The
+/// Windows form of `create`'s sequence, the same call first and then the
+/// slot steps, is pinned by the test above.
+#[cfg(unix)]
+#[test]
+fn create_flushes_the_store_directory_parent_before_its_first_commit() {
+    let made = ScratchDir::new("parent-flush-made");
+    let found = ScratchDir::new("parent-flush-found");
+    std::fs::create_dir(found.path()).unwrap_or_else(|e| panic!("cannot make {}: {e}", found.path().display()));
+    for (dir, how) in [(&made, "a directory create made"), (&found, "a directory create found")] {
+        let ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init()).unwrap_or_else(|e| panic!("{how}: {e}"));
+        let parent = dir.path().parent().unwrap_or_else(|| panic!("{how}: a scratch directory has a parent")).to_path_buf();
+        let tmp = dir.path().join("accounts.mks.tmp");
+        let snap = dir.path().join("accounts.mks");
+        let len = read_snapshot(dir).len();
+        assert_eq!(
+            ks.medium().calls(),
+            &[
+                Call::FsyncParent { dir: parent },
+                Call::WriteTemp { path: tmp.clone(), len },
+                Call::FsyncFile { path: tmp.clone() },
+                Call::Rename { from: tmp, to: snap },
+                Call::FsyncDir { dir: dir.path().to_path_buf() },
+            ],
+            "{how}: create's recorded sequence"
+        );
+    }
 }
 
 /// The image's own geometry, derived from the layout `src/keystore/format.rs`

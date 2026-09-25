@@ -12,6 +12,32 @@
 //! implement it, which is what makes "the durability contract is I2's clause"
 //! a property rather than a promise.
 //!
+//! # One primitive outside the commit
+//!
+//! [`Medium::fsync_parent`] flushes the directory that holds the store
+//! directory -- where the store directory's own entry lives, which none of
+//! the four steps reaches. `Keystore::create` calls it once, before its first
+//! commit, and no commit calls it; it takes and returns no token, because it
+//! has no place in the commit's order to hold. [`Instrumented`] records it
+//! with the parent's path, so a flush aimed at the store directory instead --
+//! a wrong path that would leave every count green -- shows in the recorded
+//! sequence. The keystore's module doc says what the flush does and does not
+//! reach.
+//!
+//! **On Windows the call is made and flushes nothing**, because there is
+//! nothing documented to call. `FlushFileBuffers`' page names a file, whose
+//! data and metadata it writes, and a volume, whose handle needs
+//! administrative privileges; `CreateFile` opens a directory only as an
+//! existing one, under `FILE_FLAG_BACKUP_SEMANTICS`; and the File Caching
+//! page's "the file must either be flushed or be opened with
+//! `FILE_FLAG_WRITE_THROUGH`" speaks of files. No page says that flushing
+//! anything an unprivileged process can open commits a directory's entry in
+//! its parent. So the Windows `fsync_parent` returns having done nothing,
+//! `Instrumented` still records it with the parent's path -- the sequence
+//! keeps Unix's shape, and the call has a place to become real in -- and the
+//! gap the Unix flush closes stays open on Windows, stated where the
+//! keystore's module doc and the specification state the flush.
+//!
 //! # The typestate
 //!
 //! Each step returns a token the next step consumes: `write_temp -> Written`,
@@ -117,6 +143,9 @@ pub trait Medium: sealed::Sealed {
     fn fsync_file(&mut self, written: Written) -> Result<Synced>;
     fn rename(&mut self, synced: Synced, dir: &Path) -> Result<Renamed>;
     fn fsync_dir(&mut self, renamed: Renamed, dir: &Path) -> Result<()>;
+    /// Flush the directory holding `dir`, which is where `dir`'s own entry
+    /// lives. Not a commit step; see the module doc.
+    fn fsync_parent(&mut self, dir: &Path) -> Result<()>;
 }
 
 /// A slot has been written in full at its new length (not yet flushed).
@@ -145,10 +174,28 @@ pub trait Medium: sealed::Sealed {
     fn flush_standing(&mut self, dir: &Path, slot: usize, held: &File) -> Result<()>;
     fn write_slot(&mut self, dir: &Path, slot: usize, held: &mut Option<File>, frame: &[u8]) -> Result<SlotWritten>;
     fn flush_slot(&mut self, written: SlotWritten) -> Result<Flushed>;
+    /// The Unix `fsync_parent`'s place in `create`, where Windows has nothing
+    /// documented to call. Not a commit step; see the module doc.
+    fn fsync_parent(&mut self, dir: &Path) -> Result<()>;
 }
 
 fn io(op: &'static str) -> impl Fn(std::io::Error) -> Error {
     move |e| Error::Io { op, kind: e.kind() }
+}
+
+/// The directory holding `dir`: its parent, `.` for a bare relative name, and
+/// `dir` itself for a root, which has no parent to hold its entry.
+///
+/// `Path::parent` answers `Some("")` for `wallet` and for `wallet/` -- the
+/// second is what shell completion types -- and opening the empty path
+/// fails, so that answer is read as the working directory it means. Without
+/// the mapping, `create --dir wallet` would be refused at its flush.
+fn parent_of(dir: &Path) -> &Path {
+    match dir.parent() {
+        Some(p) if p.as_os_str().is_empty() => Path::new("."),
+        Some(p) => p,
+        None => dir,
+    }
 }
 
 /// The real filesystem.
@@ -202,6 +249,15 @@ impl Medium for Disk {
             .sync_all()
             .map_err(io("fsync_dir"))
     }
+
+    fn fsync_parent(&mut self, dir: &Path) -> Result<()> {
+        // The same call as `fsync_dir`, one directory up: `sync_all` on a
+        // directory descriptor, `F_FULLFSYNC` on Apple targets.
+        File::open(parent_of(dir))
+            .map_err(io("fsync_parent open"))?
+            .sync_all()
+            .map_err(io("fsync_parent"))
+    }
 }
 
 /// The slot layout's steps, over the files themselves.
@@ -232,6 +288,13 @@ impl Medium for Disk {
     fn flush_slot(&mut self, written: SlotWritten) -> Result<Flushed> {
         written.file.sync_all().map_err(io("flush_slot"))?;
         Ok(Flushed { _private: () })
+    }
+
+    fn fsync_parent(&mut self, _dir: &Path) -> Result<()> {
+        // Nothing to call: no Win32 page documents a flush an unprivileged
+        // process can make that commits a directory's entry in its parent.
+        // The module doc names the pages read.
+        Ok(())
     }
 }
 
@@ -266,6 +329,10 @@ pub enum Call {
     WriteSlot { path: PathBuf, len: usize },
     #[cfg(windows)]
     FlushSlot { path: PathBuf },
+    /// The store directory's parent, as `create` names it to `fsync_parent`:
+    /// flushed on Unix, and on Windows recorded with nothing flushed, there
+    /// being no documented call to make.
+    FsyncParent { dir: PathBuf },
 }
 
 /// What a torn `write_slot` leaves: given the slot as it stood (`None` when
@@ -372,6 +439,14 @@ impl<M: Medium> Medium for Instrumented<M> {
         self.inner.fsync_dir(renamed, dir)?;
         self.interrupt_here("fsync_dir")
     }
+
+    fn fsync_parent(&mut self, dir: &Path) -> Result<()> {
+        self.calls.push(Call::FsyncParent {
+            dir: parent_of(dir).to_path_buf(),
+        });
+        self.inner.fsync_parent(dir)?;
+        self.interrupt_here("fsync_parent")
+    }
 }
 
 #[cfg(windows)]
@@ -430,6 +505,14 @@ impl<M: Medium> Medium for Instrumented<M> {
         self.interrupt_here("flush_slot")?;
         Ok(out)
     }
+
+    fn fsync_parent(&mut self, dir: &Path) -> Result<()> {
+        self.calls.push(Call::FsyncParent {
+            dir: parent_of(dir).to_path_buf(),
+        });
+        self.inner.fsync_parent(dir)?;
+        self.interrupt_here("fsync_parent")
+    }
 }
 
 /// Every byte of a slot file, from offset 0.
@@ -439,4 +522,24 @@ fn read_all(file: &mut File) -> std::io::Result<Vec<u8>> {
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes)?;
     Ok(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parent_of;
+    use std::path::Path;
+
+    /// The directory `create` flushes, for every shape `--dir` arrives in.
+    /// The bare name, with or without the slash shell completion adds, is the
+    /// case that matters: without its mapping to `.`, `create --dir wallet`
+    /// would be refused at the flush.
+    #[test]
+    fn parent_of_names_the_directory_holding_the_store_in_every_shape() {
+        assert_eq!(parent_of(Path::new("wallet")), Path::new("."));
+        assert_eq!(parent_of(Path::new("wallet/")), Path::new("."));
+        assert_eq!(parent_of(Path::new("./wallet")), Path::new("."));
+        assert_eq!(parent_of(Path::new("stores/wallet")), Path::new("stores"));
+        assert_eq!(parent_of(Path::new("/home/op/wallet")), Path::new("/home/op"));
+        assert_eq!(parent_of(Path::new("/")), Path::new("/"));
+    }
 }

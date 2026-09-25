@@ -9765,6 +9765,16 @@ const DECLARED_PANIC_SITES: &[(&str, &str, usize, &str)] = &[
          add, the generation reads, the reopen and the view.",
     ),
     (
+        "crates/mochimo-crypto/src/keystore/medium.rs",
+        "assert_eq!",
+        6,
+        "inside the #[cfg(test)] unit-test module: `parent_of`'s six shapes -- a \
+         bare name, the same with the slash shell completion adds, `./name`, a \
+         relative and an absolute path with a parent, and the root. Test-only; the \
+         medium's non-test code contains no panicking construct, and every failure \
+         of its primitives is an `Error::Io` naming the step.",
+    ),
+    (
         "crates/mochimo-crypto/src/keystore/format.rs",
         ".expect()",
         40,
@@ -12847,9 +12857,23 @@ const CARDINALS: Seg = &[
 /// wordlist, whose entries include the words rows 5, 4 and 1 match, in a
 /// file that must ship byte for byte -- and it is what keeps three live
 /// assertion messages out of reach. The cost is declared: four narrative
-/// passages live in string literals and this check cannot see them, at
-/// `tests/invariants.rs` lines 2145, 5486 and 10381 and `tests/cli.rs` line
-/// 5684. Widening the scope to reach them would put the wordlist back in.
+/// passages live in string literals and this check cannot see them, one in
+/// an assertion message of each of `no_test_in_the_suite_is_ignored`,
+/// `every_unimplemented_site_is_knowledge_not_debt` and
+/// `group_rx_is_an_oracle_with_no_reference_side` in this file, and of
+/// `group_e_constants_match_the_reference` in `tests/kat.rs`. Widening the
+/// scope to reach them would put the wordlist back in, and this table's own
+/// needles with it.
+///
+/// **The four are named by function, not by line.** A line number is true
+/// of one tree at one commit, and this doc lives in two: the Windows fork
+/// carries it over files of a different length, where three of these
+/// passages sit at other lines than they do here. A function's name holds in
+/// both and moves only when someone renames it. The four are measured, not
+/// remembered -- a port of this table's matcher, kept outside this
+/// repository, run over every string literal under `crates/` -- and nothing
+/// keeps the list true: a fifth passage written into an assertion message is
+/// named here only if someone looks again.
 ///
 /// **A red can therefore be answered by moving a sentence into an assertion
 /// message.** Nothing here detects that, and naming it is the only guard

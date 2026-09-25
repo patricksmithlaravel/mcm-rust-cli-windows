@@ -49,6 +49,43 @@
 //! [`Keystore::commit`]. `tests/invariants.rs::durable_witness_has_one_construction_site`
 //! holds that count at one. Error paths cannot mint by construction.
 //!
+//! **The store directory's own entry is flushed once, by `create`.** The four
+//! steps make the snapshot and its entry *in* the store directory durable;
+//! the store directory's own entry lives in its parent, which none of them
+//! touches. Left unflushed, a power loss on a filesystem that had not yet
+//! committed that entry could take the whole store although `create` returned
+//! and every commit inside it returned its witness -- and with it the position
+//! I2 calls durable and the reservation I3 keeps whole: a key that has signed,
+//! with nothing on disk to say so, since a restore from the phrase reads the
+//! position off the chain, where a spend that has not landed does not appear.
+//! So `create` flushes the parent through [`Medium::fsync_parent`] before its
+//! first commit, whether it made the directory or found it, and refuses
+//! rather than go on if the parent cannot be opened or flushed; the first
+//! witness exists only after that flush has returned.
+//! `tests/keystore.rs::create_flushes_the_store_directory_parent_before_its_first_commit`
+//! pins the sequence and the path flushed.
+//!
+//! **On Windows the call is made and nothing is flushed.** Win32 documents no
+//! flush an unprivileged process can make that commits a directory's entry in
+//! its parent -- `medium`'s module doc names the pages read -- so the Windows
+//! [`Medium::fsync_parent`] returns having done nothing, and on Windows a
+//! power cut before the file system commits the store directory's creation
+//! can still take the whole store, with any reservation made in it meanwhile.
+//! The call stays in `create` on both platforms, so the order is one and the
+//! Windows answer has one place to change;
+//! `tests/keystore.rs::medium_sequence_is_exactly_the_slot_steps_with_their_arguments`
+//! pins that Windows records it first, with the parent's path.
+//!
+//! What the flush does not reach, stated: the parent's own entry and every
+//! directory above it, which are the operator's -- a store placed in a
+//! directory made a moment before is only as durable as that directory's
+//! entry. Whether a flush that returned has committed anything is the
+//! filesystem's to honour, as every `fsync` here is; a flush of the directory
+//! holding the entry is the route Linux's `fsync(2)` documents, and no power
+//! was cut to test it. A kill cannot reach any of this -- the kernel keeps
+//! what `mkdir` did -- so the crash tests below cannot see it either way.
+//! `docs/specification.md`, *How a file is replaced*, says the same.
+//!
 //! # The lock
 //!
 //! `keystore.lock` is created once, never unlinked, and held with
@@ -166,7 +203,9 @@
 //! Unix; `medium`'s module doc cites the pages. No rename is relied on, so
 //! neither is its atomicity. Kills at a syscall boundary, and writes torn in
 //! any mix of sectors, are driven through the same instrument on a Windows
-//! runner, by proofs that keep the Unix proofs' names.
+//! runner, by proofs that keep the Unix proofs' names. What the flush cannot
+//! hold on Windows is the store directory's own entry in its parent, which
+//! nothing there flushes, as the paragraph on `create`'s flush above says.
 
 // The storage guarantees, per platform, which the module's head states in
 // full: the four-step commit and the lock above rest on Unix's rename(2),
@@ -505,7 +544,11 @@ pub fn newest_image(dir: &Path, password: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
 impl Keystore<Disk> {
     /// Create a new keystore in `dir` (created `0700` if absent). Refuses a
     /// directory that already holds a snapshot, and a live holder of its lock
-    /// (`Locked`); a lock file nobody holds is walked through.
+    /// (`Locked`); a lock file nobody holds is walked through. Before the
+    /// first commit it flushes `dir`'s parent on Unix, so `dir`'s own entry is
+    /// flushed before any witness exists; on Windows there is no documented
+    /// flush to make, and the call does nothing. The module doc says what the
+    /// flush does not reach.
     pub fn create(dir: &Path, init: &Init<'_>) -> Result<Self> {
         Self::create_with(dir, Disk, init)
     }
@@ -568,6 +611,18 @@ impl<M: Medium> Keystore<M> {
             slots: Slots::fresh(),
         };
         let image = ks.seal(&[], 0)?;
+        // **`dir`'s own entry, flushed before the first commit.** The four
+        // steps reach the snapshot and its entry inside `dir`; `dir`'s entry
+        // lives in its parent, which none of them touches, so the first
+        // witness is minted only after this flush has returned. It runs
+        // whether or not this call made `dir`: a directory the operator made
+        // a moment ago is no more durable than one made here, and one flush
+        // per store is the whole cost. A failure refuses `create` rather than
+        // leave the entry unflushed, the same class of residue a failed first
+        // commit leaves. On Windows the medium's `fsync_parent` flushes
+        // nothing, there being no documented call; it is called here on both
+        // platforms so that `create`'s order is one.
+        ks.medium.fsync_parent(dir)?;
         let _durable: Durable = ks.commit(&image)?;
         Ok(ks)
     }

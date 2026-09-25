@@ -4170,9 +4170,17 @@ mod pty {
     /// BSD (macOS) `script` takes the command as trailing arguments and execs
     /// it directly; util-linux takes one string after `-c` and hands it to a
     /// shell, and `-e` makes it return the child's status (BSD's always does).
-    /// **Only the BSD form has run**: the Linux form is written from
-    /// util-linux's manual and marked so, and any other host fails here rather
-    /// than passing with no terminal.
+    /// **Both forms have run.** The BSD one runs on every board on macOS. The
+    /// Linux one runs unchanged in the Windows fork's board workflow, on
+    /// GitHub's `ubuntu-24.04` runner and that runner's own `script`, which
+    /// Ubuntu takes from util-linux: all eighteen `pty::` tests passed on
+    /// Linux in each of that workflow's eight runs on 2026-09-24 and 25, on
+    /// image versions 20260907.300.1 and 20260920.314.1. The latest is run
+    /// 36188984261 in `patricksmithlaravel/mcm-rust-cli-windows`, and
+    /// `gh run view --repo patricksmithlaravel/mcm-rust-cli-windows --job
+    /// 108249252162 --log | grep -c 'test pty::.* ok'` prints 18 for its
+    /// Linux job. The log names no `script` version, so none is claimed. Any
+    /// other host fails here rather than passing with no terminal.
     fn script_command(wrapper: &Path, exe: &Path, args: &[&str]) -> Command {
         let mut cmd = Command::new("script");
         if cfg!(target_os = "macos") {
@@ -4369,9 +4377,10 @@ mod pty {
 
         /// End of input at the prompt: one `0x04` byte (VEOF), no newline.
         /// The pty's line discipline is canonical -- the binary turns echo
-        /// off and nothing else -- so a VEOF at the start of a line makes
-        /// the binary's `read_line` return zero bytes, which is the case
-        /// the third parse defect was about.
+        /// off and nothing else -- so a VEOF at the start of a line makes the
+        /// binary's first `read` of the line return zero bytes, which
+        /// `read_scrubbed_line` reports as end of input, keeping `read_line`'s
+        /// contract; that is the case the third parse defect was about.
         pub fn send_eof(&mut self) {
             let stdin = self.stdin.as_mut().expect("stdin is held until finish");
             stdin
@@ -4793,9 +4802,10 @@ mod pty {
     }
 
     /// **Ctrl-D at the password prompt is end of input, refused in its own
-    /// words before the store is read**. Trimming `read_line`'s zero bytes
-    /// to an empty password and handing it to the store reports a wrong
-    /// password instead. Delivered as one
+    /// words before the store is read**. The read returns zero bytes and
+    /// `read_scrubbed_line` hands them back as end of input; reading them as
+    /// an empty line instead, trimming that to an empty password and handing
+    /// it to the store, reports a wrong password. Delivered as one
     /// `0x04` byte with no newline into the pty; that the binary saw it as
     /// end-of-file rather than an empty line is what the refusal text
     /// shows -- the wrong-password text is absent, the end-of-input text is
