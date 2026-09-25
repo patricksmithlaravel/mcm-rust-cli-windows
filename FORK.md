@@ -224,7 +224,7 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | `tests/invariants.rs` | `the_unix_surface_is_confined_to_the_files_a_port_would_touch` lists the files the port touched, per needle, where upstream lists the four a port would | it is the record of the port; the test keeps its upstream name so that upstream edits to it still merge |
 | `tests/invariants.rs` | its five source walks name files with `/` on every platform | on Windows a relative path joins with `\`, and forty-odd name literals would stop matching |
 | `tests/invariants.rs` | the census's three demands on `pty::` tests, and the run-list witness that names one, are answered where the harness is not built by `census::not_built_here`, which asserts that `tests/cli.rs` still declares the harness behind exactly `cfg(all(unix, not(miri)))` with the test in it; the guard then reports the gap in place of evidence | the harness is `script(1)`, which Windows does not have, so the demand cannot be met there; it is replaced by a check of the declared absence rather than dropped, and on Unix nothing changes |
-| `tests/keystore.rs` | the three mode-bit tests are `cfg(unix)`; three `cfg(windows)` tests measure the access-list refusal, the protected creation and a held slot refused at `open`. The four-step sequence and the poisoned handle are `cfg(unix)` beside Windows forms, the lock test's live holder is staged without a store on Windows, the at-rest scan covers both slot files, and one arm reads its store under its own password | mode bits do not exist on Windows, a Windows store is two slots written in place, and the Windows claims need tests that run there |
+| `tests/keystore.rs` | the three mode-bit tests are `cfg(unix)`; three `cfg(windows)` tests measure the access-list refusal, the protected creation and a held slot refused at `open`. The four-step sequence and the poisoned handle are `cfg(unix)` beside Windows forms, the lock test's live holder is staged without a store on Windows, the at-rest scan covers both slot files, and one arm reads its store under its own password. `create`'s parent-flush test is `cfg(unix)`, and the Windows sequence form expects the same call first | mode bits do not exist on Windows, a Windows store is two slots written in place, and the Windows claims need tests that run there |
 | `tests/support/keystore_harness.rs` | `snapshot_bytes` and `write_snapshot` have Windows arms -- the image `open` would take, and a store in the rename layout holding the bytes given -- beside `snapshot_bytes_under` and `slot_bytes` | a Windows store is two files, and the tests that compare, parse or damage a snapshot mean its image; `tests/cli.rs` goes on reading them unchanged |
 | `tests/compile_fail.rs`, `ui/fail/medium_slot_steps_are_not_reorderable.rs` | the medium's order pin is registered per platform, and the slot steps have a pin of their own | each platform's `Medium` has only its own steps, so each pin names methods the other does not have |
 | `tests/cli.rs` | one attribute: the `pty` module is `cfg(all(unix, not(miri)))` | its harness is `script(1)`; no assertion changes, which is what the rule about this file protects |
@@ -734,10 +734,13 @@ on Windows with nothing to call them. The first is recommended.
   design uses.
 
 **Not established, here as on the path it replaces.** The store directory's
-own entry in its parent is flushed by nothing, on Windows or on Unix, so a
-power cut before the file system commits the directory's creation can take
-the whole store with it, and any reservation made in it meanwhile. It is a
-gap in both platforms' statements, and stating it is Rep-0's first. A device
+own entry in its parent. Rep-0 stated that gap in `3269e2e` and closed it on
+Unix in `c2b08ce` -- `create` flushes the parent before its first commit --
+and both came down in `e43a70d`. On Windows the same call flushes nothing,
+because Win32 documents no flush an unprivileged process can make that
+commits a directory's entry, so there a power cut before the file system
+commits the directory's creation can still take the whole store with it,
+and any reservation made in it meanwhile. A device
 that does not honour a flush. And all of the above is unbuilt.
 
 **When it is built, every statement of the hazard changes with it**:
@@ -1036,10 +1039,10 @@ give it. Defender's real-time protection is off on the image, so the holder
 R1-4 names, a scanner, held nothing. Power loss is beyond any board. And
 `verify` -- the Miri run and `cargo deny` -- has not run on Windows.
 
-**On Linux** the eighteen `pty::` tests pass in all three runs through
-util-linux `script(1)`, the form `tests/cli.rs` describes as written from the
-manual and never run. That comment is Rep-0's, and correcting it is a Rep-0
-change.
+**On Linux** the eighteen `pty::` tests pass in all eight runs through
+util-linux `script(1)`, the form `tests/cli.rs` described as written from the
+manual and never run. That comment was Rep-0's to correct: `7ed9eec` says
+the form has run, citing these runs, and it came down in `e43a70d`.
 
 **`verify` on Windows, assembled (decided 2026-09-25).** `RELEASE.md`'s
 Windows row takes `./board verify` in its three parts, and only `check` has
