@@ -154,10 +154,23 @@ const PHRASE_CAPACITY: usize = 512;
 /// refused here, before anything is compared, in the same class as "no
 /// terminal" -- so Ctrl-D at the password prompt is reported as the input it
 /// was rather than as a wrong password.
+#[cfg(unix)]
 const END_OF_INPUT: &str =
     "end of input at the prompt: the terminal reported end-of-file (Ctrl-D) before a line was \
      typed, so nothing was read and nothing was compared. Type the answer and press Enter, or \
      run the command again.";
+/// What a prompt says when the console reports end of input before a line
+/// was typed, refused for the same reason as on Unix. The keys named are
+/// Windows' own, because Unix's would send an operator to a key that ends
+/// nothing at a console: a `Ctrl-Z` beginning the line, which the `console`
+/// module's `CTRL_Z` makes the end of input, and `Ctrl-C`, whose read
+/// returned no characters in the run at a Windows console that `FORK.md`
+/// records.
+#[cfg(windows)]
+const END_OF_INPUT: &str =
+    "end of input at the prompt: the console reported end of input (Ctrl-Z at the start of the \
+     line, or Ctrl-C) before a line was typed, so nothing was read and nothing was compared. \
+     Type the answer and press Enter, or run the command again.";
 
 /// The device secrets are read from, as every message about it names it.
 ///
