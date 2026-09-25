@@ -1695,7 +1695,7 @@ Everything below is a present-tense property of the wallet as it ships. None of 
 
 ### The platforms are Unix and Windows
 
-This wallet targets Unix and Windows. It is built and tested on **Linux** and **macOS**. **On Windows the board passes and the binary has not run**: `./board check` is green on a Windows runner, whose tests measure the keystore's access lists and its rename refusal and drive its lock and its commit path, and nothing runs the shipped binary there, so its console and its generator are measured by nothing. `FORK.md` records the run; `RELEASE.md` records a release's verification, and none has run on Windows. A build for any other target fails at compile time rather than degrading: `lib.rs` names the three interfaces the crate needs and `keystore` names the storage guarantees it rests on.
+This wallet targets Unix and Windows. It is built and tested on **Linux** and **macOS**. **On Windows the board passes, and the binary has been run once, by a person**: `./board check` is green on a Windows runner, whose tests measure the keystore's access lists and its refusal of a store another program holds and drive its lock and its commit path; no test runs the shipped binary there, and its console and its generator have been exercised by one person's run at a Windows 11 console on x86-64 and by nothing else. `FORK.md` records both; `RELEASE.md` records a release's verification, and none has run on Windows. A build for any other target fails at compile time rather than degrading: `lib.rs` names the three interfaces the crate needs and `keystore` names the storage guarantees it rests on.
 
 Three things make it so, and none of them is a convenience:
 

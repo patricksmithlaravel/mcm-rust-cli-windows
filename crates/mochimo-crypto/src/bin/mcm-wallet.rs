@@ -825,39 +825,58 @@ use console::{open_terminal, os_bytes, EchoGuard};
 /// end of input refused as such -- is written once, and a fix to it reaches
 /// Windows in the same commit it reaches Unix.
 ///
-/// # What is not established
+/// # What has run, and what is not established
 ///
-/// **None of this has run.** It compiles and passes clippy for
-/// `x86_64-pc-windows-msvc` from a macOS host, and nothing here has executed
-/// on Windows. `tests/cli.rs`'s pseudo-terminal harness is what establishes
-/// the Unix arm's prompts, and it has no Windows counterpart. Five things in
-/// particular are read from documentation and not measured:
+/// **One person's run at a console, and no test.** It compiles and passes
+/// clippy for `x86_64-pc-windows-msvc` from a macOS host, and the board on a
+/// Windows runner builds it natively, but nothing on any board executes it:
+/// `tests/cli.rs`'s pseudo-terminal harness, which establishes the Unix
+/// arm's prompts, has no Windows counterpart. What has executed is one run of
+/// the shipped binary, built from `e8d73aa`, by a person at a Windows 11
+/// console on x86-64, in an elevated session; `FORK.md` records its results.
+/// Against the five things this arm rests on:
 ///
-/// * Under a terminal that is not a Windows console and hosts no
-///   pseudo-console -- `mintty` without `winpty` -- `CONIN$` may open a
-///   console nobody can see, and the prompt would wait for input nobody can
-///   type. Windows Terminal, the classic console host and editors that host a
-///   pseudo-console are the case this is written for.
-/// * `Ctrl-C` at a prompt ends the process through the default control
-///   handler, which runs no destructor, so echo stays off in that console.
-///   That is the Unix arm's `SIGINT` gap in another shape, and the README's
-///   limits already carry it for signals.
-/// * The console mode belongs to the console's input buffer, which the
-///   parent shell shares. Restoring it is the guard's job on every path that
-///   unwinds, and it is checked where a visible answer depends on it.
 /// * A line longer than one read arrives over several `ReadConsoleW` calls,
 ///   and a long phrase is one: at the sizes `READ_UNITS`'s doc gives, its 215
 ///   characters and CR LF take two. Joining them rests on the console keeping
-///   the rest of a cooked line for the next call. Microsoft's page on the
-///   high-level console functions says as much -- "Unread characters are
-///   buffered until the next read operation" -- and nothing has run it.
+///   the rest of a cooked line for the next call, as Microsoft's page on the
+///   high-level console functions says -- "Unread characters are buffered
+///   until the next read operation". **Run:** a 215-character phrase, read
+///   over two calls, derived the destination macOS derives from it.
 /// * `Ctrl-Z` ends the input only when it begins a line, and `Console` tells
 ///   a line's start by whether the read before it ended on the line feed a
 ///   cooked read hands back with the Enter that ends the line.
 ///   `SetConsoleMode`'s page documents, for `ENABLE_LINE_INPUT`, that a read
 ///   returns only once a carriage return is read; the line feed after it is
 ///   what `read_scrubbed_line` stops on, at a console as at a terminal, so the
-///   test rests on nothing the shared reader does not. Nothing has run it.
+///   test rests on nothing the shared reader does not. **Run:** a `Ctrl-Z`
+///   beginning a line was refused as end of input, and one typed as the
+///   170th character of a line was a character of that line.
+/// * The console mode belongs to the console's input buffer, which the
+///   parent shell shares. Restoring it is the guard's job on every path that
+///   unwinds, and it is checked where a visible answer depends on it.
+///   **Run:** the confirmation after the phrase echoed, and so did the shell
+///   once `create` returned.
+/// * `Ctrl-C` at a prompt: by Microsoft's documentation the default control
+///   handler ends the process, which runs no destructor and would leave echo
+///   off in that console -- the Unix arm's `SIGINT` gap in another shape,
+///   which the README's limits carry for signals. **Run, from PowerShell:**
+///   the prompt's read returned no characters, the refusal printed was the
+///   end-of-input one, and the shell echoed afterwards, the guard having
+///   restored the mode before that refusal. Whether the handler ended the
+///   process after it, and whether the read returns first every time, is not
+///   established.
+/// * Under a terminal that is not a Windows console and hosts no
+///   pseudo-console -- `mintty` without `winpty` -- `CONIN$` may open a
+///   console nobody can see, and the prompt would wait for input nobody can
+///   type. Windows Terminal, the classic console host and editors that host a
+///   pseudo-console are the case this is written for. **Run:** through
+///   `winpty` the prompt worked; what it did without is not recorded.
+///
+/// The same run carried a password with `ü`, `ß`, `ñ` and `ú`, and one with
+/// two emoji, through the wide calls to the UTF-8 macOS sealed stores under,
+/// and saw `BCryptGenRandom` return success for the three draws `create`
+/// makes. It is one elevated session on one machine.
 #[cfg(windows)]
 mod console {
     use std::fs::File;

@@ -811,7 +811,7 @@ there is no handle to poison -- while a program that comes later cannot open
 a held slot for writing at all. `ReplaceRefused` is gone with the rename, and
 the held-snapshot test with it; the held-slot test replaces both.
 
-### R1-5 -- the binary **(done, 2026-09-22; built on a Windows runner, never run there)**
+### R1-5 -- the binary **(done, 2026-09-22; built on a Windows runner; run at a Windows console by a person, 2026-09-25)**
 
 `/dev/tty`, `stty` and `/dev/urandom` are the binary's, not the library's --
 the library takes entropy as a parameter and `cli::create::Terminal` is already
@@ -826,8 +826,9 @@ it reaches both platforms.
 
 The shipped binary, TLS and all, builds natively on a Windows runner: the
 `build: shipped` and `clippy: mesh-https` rows are green there, `ring`'s C
-compiled by the image's MSVC. Nothing runs it, so the console, its echo
-handling and `BCryptGenRandom` are established by nothing that executes.
+compiled by the image's MSVC. No board runs it, so on a runner the console,
+its echo handling and `BCryptGenRandom` are established by nothing that
+executes; one person's run at a console, below, is all that has.
 
 The console module's six `unsafe` blocks were reviewed with the permission
 arm's (R1-2) and needed no change. `unsafe_is_confined_to_declared_files`
@@ -840,7 +841,69 @@ read as the end, so with the 512-byte chunks `read_scrubbed_line` offers, a
 `Ctrl-Z` typed as a line's 170th character cut the line there. `Console` now
 tracks whether its next read begins a line, and nothing Rep-0 owns moved. The
 changed module has compiled natively on a Windows runner, in the fifth run
-below, and has not run.
+below, and has run at a console in the run recorded next.
+
+**Run at a Windows console, 2026-09-25.** A person other than the
+maintainer ran the shipped binary, built from `e8d73aa`, at a Windows 11
+24H2 console on an x86-64 machine, following a written runbook of setup and
+eleven checks, and sent the results back as text. The runbook asked for an
+unelevated session and the run was elevated, at High mandatory level;
+Defender's state was not recorded; and the terminal for most checks was
+recorded only as neither Windows Terminal nor the classic console. The
+build, under Git for Windows 2.55.0.windows.5 and rustc 1.98.0, finished,
+rustls 0.23.45 and `ring`'s C with it. Ten of the eleven checks came back as
+the runbook described them:
+
+- `create`: both password prompts took typing unseen, the phrase was shown,
+  the three-word confirmation echoed, the store was written with exit 0, and
+  the shell echoed normally afterwards. So the console mode was turned off,
+  restored, and restored checked on the path that needs it, and
+  `BCryptGenRandom` returned success for the phrase, the salt and the nonce
+  seed.
+- `address` opened that store, and a wrong password was refused with
+  `WrongPassword`'s text and exit 2.
+- `create --from-phrase` read a 215-character phrase over two `ReadConsoleW`
+  calls and derived `ymDfL9C6eftjnVuhfHdhqjMp4KBfbu`, the destination macOS
+  derives from it; its password, 169 characters and so 171 units with the
+  CR LF, was read the same way and opened the store again.
+- A `Ctrl-Z` beginning a line was refused as end of input, exit 2. A `Ctrl-Z`
+  as the 170th character of a line, the first of its second read, was a
+  character of the line: the 169 characters with it and an `x` did not
+  decrypt the store, and the 169 alone did. That is `7ca154d`'s behaviour,
+  measured.
+- `blocks` and `balance` against `https://api.mochimo.org` completed TLS
+  handshakes with rustls 0.23.45 -- the first handshake of this tree on
+  Windows -- and `balance` refused the unfunded store on the node's `account
+  not found`, as it must.
+- Two stores sealed on macOS, one under a password with `ü`, `ß`, `ñ` and
+  `ú` and one with two emoji outside the Basic Multilingual Plane, opened on
+  Windows under the same passwords pasted at the console. The UTF-16 the
+  console delivered was transcoded to the UTF-8 macOS sealed under,
+  surrogate pairs whole.
+- The classic console window, `conhost`, behaved as the other terminal did,
+  for the `a` store and the Latin one.
+- Git Bash reached a working prompt through `winpty`. Which of the runbook's
+  three outcomes it met without `winpty`, and its `MSYS` value, were not
+  recorded.
+
+The eleventh was `Ctrl-C`, and it differed from what the console module
+expected. From Microsoft's documentation the module had the default control
+handler end the process at a prompt, running no destructor and leaving echo
+off. From PowerShell, `Ctrl-C` at the `password:` prompt produced the
+end-of-input refusal instead -- which here means a `ReadConsoleW` that
+returned no characters -- and `echo hello` at the shell afterwards was
+echoed. The guard restores the mode before that refusal prints, so the
+restored console follows from the order the code already has. Whether the
+handler ended the process after the refusal, which the unrecorded exit code
+would say, and whether the read returns first every time, is not
+established; the Command Prompt half of the check is not in the results.
+
+What the run does not establish: the access-list check met the
+Administrators group as the owner, as on the runner, because the session
+was elevated, so an unelevated desktop is still unmeasured (R1-2). Nothing
+held a store open, and whether a scanner was running is not known. It is
+one run on one machine, returned as text, and nothing in the tree repeats
+it.
 
 ### R1-6 -- the board **(done, 2026-09-22; green on all three platforms, 2026-09-24; its Windows `verify` assembled from parts, 2026-09-25)**
 

@@ -53,8 +53,9 @@
 //! column is what every board run measures. Of the Windows column, the first
 //! row is measured by the board on a Windows runner, access-list refusals
 //! included, and `FORK.md` records the run; the other two rows are the
-//! binary's, and nothing runs the binary on Windows. The BSDs have all three
-//! Unix interfaces and are untested.
+//! binary's, which no board runs on Windows, and one person's run at a
+//! Windows console, which `FORK.md` also records, is all that has executed
+//! them. The BSDs have all three Unix interfaces and are untested.
 
 #![cfg_attr(not(test), deny(clippy::unwrap_used, clippy::expect_used))]
 #![deny(unsafe_op_in_unsafe_fn)]
