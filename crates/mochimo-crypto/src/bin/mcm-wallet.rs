@@ -830,7 +830,7 @@ use console::{open_terminal, os_bytes, EchoGuard};
 /// **None of this has run.** It compiles and passes clippy for
 /// `x86_64-pc-windows-msvc` from a macOS host, and nothing here has executed
 /// on Windows. `tests/cli.rs`'s pseudo-terminal harness is what establishes
-/// the Unix arm's prompts, and it has no Windows counterpart. Four things in
+/// the Unix arm's prompts, and it has no Windows counterpart. Five things in
 /// particular are read from documentation and not measured:
 ///
 /// * Under a terminal that is not a Windows console and hosts no
@@ -851,6 +851,13 @@ use console::{open_terminal, os_bytes, EchoGuard};
 ///   the rest of a cooked line for the next call. Microsoft's page on the
 ///   high-level console functions says as much -- "Unread characters are
 ///   buffered until the next read operation" -- and nothing has run it.
+/// * `Ctrl-Z` ends the input only when it begins a line, and `Console` tells
+///   a line's start by whether the read before it ended on the line feed a
+///   cooked read hands back with the Enter that ends the line.
+///   `SetConsoleMode`'s page documents, for `ENABLE_LINE_INPUT`, that a read
+///   returns only once a carriage return is read; the line feed after it is
+///   what `read_scrubbed_line` stops on, at a console as at a terminal, so the
+///   test rests on nothing the shared reader does not. Nothing has run it.
 #[cfg(windows)]
 mod console {
     use std::fs::File;
@@ -877,24 +884,38 @@ mod console {
     /// what is not established says what the joining rests on.
     const READ_UNITS: usize = 4096;
 
-    /// What a read beginning with `Ctrl-Z` means at a Windows console: end of
-    /// input, as `std`'s own console reader treats it. It reaches the shared
-    /// code as a zero-byte read, which is refused as `END_OF_INPUT` when
-    /// nothing came before it on the line.
+    /// What a line beginning with `Ctrl-Z` means at a Windows console: end of
+    /// input, as it is to `std`'s own console reader at the start of a line.
+    /// It reaches the shared code as a zero-byte read, which is refused as
+    /// `END_OF_INPUT`, since nothing came before it on the line.
     ///
-    /// **The test is per read, not per line.** In a line longer than one read,
-    /// a `Ctrl-Z` that falls first in a later read -- at the size
-    /// `READ_UNITS`'s doc gives, the 170th character of a line with no
-    /// surrogate pair before it -- ends the input there: what came before it
-    /// is returned as the line, the rest of that read is dropped, and anything
-    /// past that read is left in the console for whatever reads next. A
-    /// `Ctrl-Z` anywhere else in a line is a character like any other.
+    /// **The test is per line, not per read.** A line longer than one read
+    /// arrives over several -- at the size `READ_UNITS`'s doc gives, the 170th
+    /// character of a line with no surrogate pair before it begins the second
+    /// -- and a `Ctrl-Z` that falls first in a later read is a character of
+    /// the line, as a `Ctrl-Z` anywhere else in it is. `Console` knows whether
+    /// a read begins a line from the read before it, so where a line breaks
+    /// into reads, which the buffer `read_scrubbed_line` offers decides,
+    /// decides nothing here.
     const CTRL_Z: u16 = 0x1A;
+
+    /// Where a line ends, as `read_scrubbed_line` reads one: the line feed of
+    /// the CR LF a cooked read hands back with the Enter that ends the line.
+    const LF: u16 = 0x0A;
 
     /// The console's input buffer and active screen buffer.
     pub(super) struct Console {
         input: File,
         output: File,
+        /// Whether the next read begins a line: set when the console is
+        /// opened, cleared by a read that ends inside a line, and set again
+        /// by one that ends on `LF`. `CTRL_Z`'s test asks it.
+        ///
+        /// A clone carries the flag of the handle it came from. Every clone
+        /// this program takes is of a handle the `Terminal` impl never reads
+        /// through, so each begins at a line's start, and `read_scrubbed_line`
+        /// reads one clone to the end of one line and no further.
+        at_line_start: bool,
     }
 
     impl Console {
@@ -902,6 +923,7 @@ mod console {
             Ok(Console {
                 input: self.input.try_clone()?,
                 output: self.output.try_clone()?,
+                at_line_start: self.at_line_start,
             })
         }
 
@@ -930,6 +952,9 @@ mod console {
         /// typed byte has to be held here between calls. A read that ends on
         /// a high surrogate is completed by one more unit, which the same
         /// bound has room for, so a pair is never split across two reads.
+        ///
+        /// A read that begins a line with `Ctrl-Z` is end of input, and
+        /// `CTRL_Z`'s doc says why it must begin a line and not only a read.
         fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
             let want = (buf.len() / 3).min(READ_UNITS);
             if want < 2 {
@@ -940,7 +965,11 @@ mod console {
             if n > 0 && (0xD800..0xDC00).contains(&units[n - 1]) {
                 n += self.read_units(&mut units[n..n + 1])?;
             }
-            if units[..n].first() == Some(&CTRL_Z) {
+            let begins_a_line = self.at_line_start;
+            if let Some(&last) = units[..n].last() {
+                self.at_line_start = last == LF;
+            }
+            if begins_a_line && units[..n].first() == Some(&CTRL_Z) {
                 return Ok(0);
             }
             let mut written = 0;
@@ -1077,6 +1106,7 @@ mod console {
         let file = Console {
             input: open("CONIN$")?,
             output: open("CONOUT$")?,
+            at_line_start: true,
         };
         let _echo = echo_off(&file)?;
         Ok(Tty { file, _echo })
