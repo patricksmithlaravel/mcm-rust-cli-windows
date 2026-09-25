@@ -92,14 +92,13 @@
 //!
 //! **Run:** `./board check` passes on a GitHub Windows runner -- Windows
 //! Server 2025, build 26100 -- where every store the tests open is checked by
-//! this file and the keystore makes its lock through it, and where
-//! `open_refuses_a_directory_everyone_can_write_to` and
-//! `a_store_created_under_a_writable_parent_inherits_nothing_from_it`, two of
-//! the `cfg(windows)` tests in `tests/keystore.rs`, pass. `FORK.md` records
-//! the runs. **Not run yet:** `create_slot` and `open_slot`, through which
-//! the slot layout makes and opens every store file on Windows, and
+//! this file, the keystore makes its lock through it, and the slot layout
+//! makes and opens every store file through `create_slot` and `open_slot`.
+//! The three `cfg(windows)` tests in `tests/keystore.rs` pass there:
+//! `open_refuses_a_directory_everyone_can_write_to`,
+//! `a_store_created_under_a_writable_parent_inherits_nothing_from_it`, and
 //! `a_slot_held_open_without_write_sharing_refuses_the_open_by_name`, which
-//! measures the refusal the second makes.
+//! measures the refusal `open_slot` makes. `FORK.md` records the runs.
 //!
 //! **Not established:** the runner's account is an elevated administrator,
 //! and a directory it creates is owned by the Administrators group, so the
