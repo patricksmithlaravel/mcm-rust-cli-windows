@@ -84,9 +84,11 @@
 //! descriptor nor creates a file under one. Every call below is a plain Win32
 //! function through `windows-sys`, and every `unsafe` block carries the
 //! condition it relies on. The library's boundary is this file and nothing
-//! else: `unsafe_is_confined_to_declared_files` names it, and Miri, which interprets
-//! Rust and cannot interpret a foreign call, walks none of it -- nor could it,
-//! since the Miri run is on a Unix host where this file is not compiled.
+//! else: `unsafe_is_confined_to_declared_files` names it. Miri, which
+//! interprets Rust and cannot interpret a foreign call, walks none of it, and
+//! no Miri run reaches it: on a Unix host this file is not compiled, and for
+//! the Windows target, which `RELEASE.md` has Miri interpret as well, every
+//! test that reaches this file does file I/O, which Miri's isolation refuses.
 //!
 //! # What has run, and what is not established
 //!

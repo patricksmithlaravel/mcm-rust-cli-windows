@@ -16,8 +16,34 @@ run, on every platform, at the commit being tagged.
       `git status --short` prints nothing.
 - [ ] `./board verify` is **green on Linux**. Record the run below.
 - [ ] `./board verify` is **green on macOS**. Record the run below.
-- [ ] `./board verify` is **green on Windows**, run from Git Bash as the
-      board's head describes. Record the run below.
+- [ ] `./board verify` is **green on Windows**, in its three parts, each at
+      the commit being tagged. Only the first has to run on Windows, so the
+      three may come from three runs rather than one -- `./board verify`
+      run whole on a Windows host is all three at once. Record them in one
+      row below, each with where it ran:
+
+      - `./board check`, green on Windows: from Git Bash as the board's
+        head describes, or the workflow's Windows job (below).
+      - `cargo deny check`, green on any host. `deny.toml` leaves `targets`
+        unset and sets `all-features`, so the graph it judges is the whole
+        lockfile's and not a host's; the `linux` or `macos` row's own run
+        at this commit is this part too.
+      - Miri for the Windows target, green on any host, with MIRIFLAGS
+        unset as the board leaves it:
+
+            cargo +nightly miri test -p mochimo-crypto --target x86_64-pc-windows-msvc
+
+        On an x86_64 Windows host that is `./board verify`'s Miri row;
+        anywhere else the target has to be named. Miri interprets the
+        target it is given whatever the host -- its README calls this
+        cross-interpretation -- and with MIRIFLAGS unset its isolation is
+        on, which the README says replaces entropy, environment variables
+        and clocks with deterministic fakes, and which refuses the file
+        system. The same README says isolation is not a sandbox, and that
+        a gap in it is a Miri bug.
+
+      The third part reaches less than its name suggests: *What this
+      checklist does not reach* says what.
 - [ ] **The Windows power-loss hazard is closed, at the commit being
       tagged.** The hazard was a directory entry nothing could flush: a power
       cut before NTFS committed a rename could bring back the previous
@@ -133,8 +159,11 @@ reach a platform, and it changes nothing above:
 - **It gates nothing.** No pull request waits on it and no check is required
   of one.
 - **It runs `check`, not `verify`.** A green run is evidence about the board
-  on that platform, and the record below is for `verify`. Whether the Miri
-  run finishes inside a hosted job's six hours has not been measured.
+  on that platform, and the record below is for `verify`. A green Windows
+  job is the first of the three parts that platform's row is assembled
+  from, and the gate says why the other two need no Windows host. Whether
+  the Miri run finishes inside a hosted job's six hours has not been
+  measured.
 - **It writes nothing here.** The run's log is the transcript, GitHub deletes
   it when its retention period ends, and the record is what a person copies
   out of it before then.
@@ -177,6 +206,18 @@ narrow.
   Windows board is a statement about the library and the command layer, which
   every other target reaches, and not about `CONIN$`, `CONOUT$` or
   `BCryptGenRandom`, which only a person at a Windows console has seen work.
+- **Miri reaches none of the port's `unsafe`.** That `unsafe` is in
+  `keystore/perms/windows.rs` and the binary's `console` module, where
+  `unsafe_is_confined_to_declared_files` holds it. Every test that reaches
+  the first does file I/O, which Miri's isolation refuses and which those
+  targets are `not(miri)` for, and the binary is not built in the
+  configuration Miri interprets. So the Windows row's Miri part runs the
+  same tests as a macOS host's -- `-- --list` names the same ones for both
+  targets -- over Windows' `std` and with the `cfg(windows)` arms compiled
+  in, and not one Win32 call of the port's. The Windows board runs the
+  permission model's blocks natively, where undefined behaviour need not
+  show itself; what stands behind them is the condition each block states
+  beside it.
 - The TLS graph cannot be cross-compiled: `ring` compiles C for its target,
   so every platform's `mesh-https` rows run on that platform's own host.
 
@@ -199,6 +240,11 @@ rustc's exact diagnostic wording and a toolchain bump can turn it red with no
 change to the property it checks. The stable half should now equal the channel
 in `rust-toolchain.toml`; recording it anyway is what would show that someone
 had overridden the pin, which a row reading only "pinned" never could.
+
+A `windows` row may be assembled, as its gate says. Its `OS / kernel` is
+then the Windows host `./board check` ran on, and its `./board verify` cell
+names each part and where it ran: the check by its host or its workflow
+run, `cargo deny` by its host, and Miri by its host and target.
 
 A tag needs one green `linux` row, one green `macos` row and one green
 `windows` row at the commit being tagged. Rows at different commits are

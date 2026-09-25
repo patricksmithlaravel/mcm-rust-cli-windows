@@ -14,7 +14,8 @@
 # the manual replacement for automated verification, and this does not replace
 # it. There is no `pull_request` trigger and no required check; nothing here
 # writes the record, and a green run is not a row in it -- the record is for
-# `verify`. A run starts when someone pushes a branch whose name begins
+# `verify`, of which a green Windows job is one part of three, the part that
+# needs Windows. A run starts when someone pushes a branch whose name begins
 # `board/`, which works before this file reaches the default branch, or
 # dispatches the workflow from the Actions tab, which works only after. What a
 # run leaves is a log. A person reads it and writes down what it says; GitHub
@@ -31,9 +32,11 @@
 # `check`, NOT `verify`. `verify` adds `cargo deny check` and the Miri run,
 # which AGENT.md puts at hours rather than minutes. A hosted job is stopped
 # at six hours, and whether Miri on these runners finishes inside that has not
-# been measured -- nor what it does on Windows, where the keystore's
-# access-list arm is foreign calls and Miri cannot interpret a foreign call.
-# RELEASE.md's tag gate still asks for `verify` on each platform.
+# been measured. RELEASE.md's tag gate still asks for `verify` on each
+# platform, and takes the Windows one in its parts: this workflow's Windows
+# job for `check`, and `cargo deny` and Miri for the Windows target from any
+# host, since neither's verdict depends on the host that runs it. Its gate
+# says why, and what Miri for that target does and does not reach.
 #
 # NO ACTIONS. Every step is a command against tools the runner image already
 # carries: git, rustup, a C compiler for `ring`. A `uses:` line is another

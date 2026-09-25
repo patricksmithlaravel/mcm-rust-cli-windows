@@ -842,7 +842,7 @@ tracks whether its next read begins a line, and nothing Rep-0 owns moved. The
 changed module has compiled natively on a Windows runner, in the fifth run
 below, and has not run.
 
-### R1-6 -- the board **(done, 2026-09-22; green on all three platforms, 2026-09-24)**
+### R1-6 -- the board **(done, 2026-09-22; green on all three platforms, 2026-09-24; its Windows `verify` assembled from parts, 2026-09-25)**
 
 `./board` is a POSIX shell script. `RELEASE.md` asks for green on two platforms
 at one commit; it becomes three.
@@ -943,6 +943,48 @@ R1-4 names, a scanner, held nothing. Power loss is beyond any board. And
 util-linux `script(1)`, the form `tests/cli.rs` describes as written from the
 manual and never run. That comment is Rep-0's, and correcting it is a Rep-0
 change.
+
+**`verify` on Windows, assembled (decided 2026-09-25).** `RELEASE.md`'s
+Windows row takes `./board verify` in its three parts, and only `check` has
+to run on Windows; the workflow's Windows job runs it. `cargo deny check`
+judges the whole lockfile wherever it runs, because `deny.toml` leaves
+`targets` unset and sets `all-features`. Miri interprets the target it is
+given, so `cargo +nightly miri test -p mochimo-crypto --target
+x86_64-pc-windows-msvc` is, from any host, the Miri row an x86_64 Windows
+host's `verify` makes, and with MIRIFLAGS unset its isolation keeps the
+host's entropy, environment and clocks out of what it interprets and
+refuses its file system. The row's gate argues each part, and the
+workflow's head says what its Windows job is to the row.
+
+Measured from this macOS host at `76225ac`: `cargo +nightly miri setup
+--target x86_64-pc-windows-msvc` built the sysroot in about eight seconds;
+`cargo +nightly miri test -p mochimo-crypto --target x86_64-pc-windows-msvc
+--no-run` compiled every test binary; the same command with `-- --list` in
+place of `--no-run` names the same sixty tests, counted by their `: test`
+lines, as it does for `aarch64-apple-darwin` -- forty-one of them the
+library's, the slot layout's seven among those -- and `--test txwire`
+passed its three for both targets, in about forty seconds each. The whole
+run for the target has not been made; when it is, it belongs in a row of
+`RELEASE.md`'s record at a tagged commit.
+
+What those sixty reach is narrower than the name of the part. None of the
+port's `unsafe` is under them: every test that reaches `perms/windows.rs`
+does file I/O and is `not(miri)`, and the binary, which holds the console's,
+is not built in the configuration Miri interprets. So what the Windows
+target adds is Windows' `std` beneath the same tests, with the
+`cfg(windows)` arms compiled in, and no Win32 call of the port's own.
+`RELEASE.md` says so among what its gates do not reach, and the permission
+arm's head and the allow-list's comment, which gave a Unix host as the
+reason Miri walks none of that arm, now give the Windows target's reason
+beside it.
+
+`cargo deny check` is red at `76225ac`, and by the argument above on every
+host: RUSTSEC-2026-0285, in `rustls` 0.23.43, which `ureq` brings in under
+`mesh-https` -- TLS 1.3 handshake messages accepted across a change of
+encryption level. The advisory's fix is 0.23.45, and `cargo update -p
+rustls --dry-run` moves that one package and nothing else. Rep-0's lockfile
+carries the same line, so the change is made there and comes down by
+merge; until it does, no row can be green.
 
 ### R1-7 -- the surface check **(done, 2026-09-22)**
 

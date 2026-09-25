@@ -10146,11 +10146,14 @@ fn unsafe_is_confined_to_declared_files() {
     // neither reads a security descriptor nor creates a file under one, so
     // the access-list check and the owner-only creation are foreign calls or
     // they are nothing. Miri cannot walk them -- it interprets Rust, and a
-    // foreign call is the edge of what it can see -- and the Miri run is on a
-    // Unix host, where the file is not compiled at all. So a green Miri run
-    // says nothing about this file in either direction, and the file's own
-    // head says what does establish it: the board on a Windows runner, whose
-    // tests go through every block, and what that run does not reach.
+    // foreign call is the edge of what it can see -- and no Miri run reaches
+    // the file: on a Unix host it is not compiled at all, and for the Windows
+    // target, which `RELEASE.md` has Miri interpret as well, every test that
+    // would reach it does file I/O, which Miri's isolation refuses and which
+    // those targets are `not(miri)` for. So a green Miri run says nothing
+    // about this file in either direction, and the file's own head says what
+    // does establish it: the board on a Windows runner, whose tests go
+    // through every block, and what that run does not reach.
     //
     // The second row is the binary's Windows console, on the same two
     // grounds. `std` offers no console mode, so echo cannot be turned off
