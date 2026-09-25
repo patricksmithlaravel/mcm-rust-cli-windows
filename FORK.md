@@ -935,7 +935,7 @@ the branch is pushed alone. Its Linux and macOS jobs are coverage Rep-0 lacks
 as much as this tree does. If Rep-0 takes a workflow of its own, it is made
 there and flows down, and this file keeps only what Windows adds.
 
-**Seven runs, 2026-09-24 and 25.** Each figure is summed from that job's own
+**Eight runs, 2026-09-24 and 25.** Each figure is summed from that job's own
 seventeen result lines, read with `gh run view <run> --job <job> --log`:
 
 | run | commit | Linux | macOS | Windows |
@@ -947,6 +947,7 @@ seventeen result lines, read with `gh run view <run> --job <job> --log`:
 | 36091463164 | `7ca154d` | green, 393 passed | green, 393 passed | green, 375 passed |
 | 36095852071 | `764e7be` | green, 400 passed | green, 400 passed | green, 382 passed |
 | 36106141274 | `cb933ce` | green, 400 passed | seven rows green; `test` red, 399 passed and 1 failed; re-run green, 400 passed | green, 382 passed |
+| 36188984261 | `e451bde` | green, 400 passed | green, 400 passed | green, 382 passed |
 
 Nothing was ignored on any platform. Windows runs eighteen fewer: the
 `pty::` tests its gate removes. The third run is of the tree after Rep-0's
@@ -969,7 +970,8 @@ keystore tests the rename layout's steps shaped; the `msrv` job is green on
 all three again. The seventh runs Rep-0's `rustls` 0.23.45, merged down in
 `be28279`: the Windows `clippy: mesh-https` and `build: shipped` rows
 compiled it natively, and the `msrv` job compiled it on 1.89.0 on all three
-and is green on each.
+and is green on each. The eighth runs Rep-0's remedy for the seventh's one
+red, which the next paragraph describes, and is green in all six jobs.
 
 The seventh's one red was on macOS, in
 `pty::submit_on_a_real_pty_ships_a_saved_artifact_and_opens_no_store`, and
@@ -991,18 +993,22 @@ the same image, passed 400 with that test green. The test is Rep-0's, in
 `tests/cli.rs`, which this tree does not change, so the remedy was Rep-0's
 to make: `ed4bb33` takes the test's hold, and its read-back after the
 release, through the harness's `reopen`, which retries `Locked` alone,
-bounded, and reports every retry. It came down in `cc39bb8`, and no runner
-has run it yet.
+bounded, and reports every retry. It came down in `cc39bb8`, and the eighth
+run is its first on a runner: all six jobs green at the first attempt, and
+on the two Unix runners the test's hold and its read-back took no retry.
+The one `keystore reopen` line in each job's log is the `[genuine holder]`
+test's, which retries to its bound on purpose. One green run says the fix
+works there; that the race did not bite once says nothing about its tail.
 
 The hosts were Linux 6.17 on x86_64, Darwin 25.6 on arm64 and Windows
 10.0.26100 on x86_64. `macos26` was 20260907.0351.1 throughout; `ubuntu24`
 moved from 20260907.300.1 to 20260920.314.1 after the first run; and within
 each of the third and fourth runs the Windows board job had `win25-vs2026`
 20260907.229.1 while the Windows `msrv` job had 20260922.246.2, where in the
-fifth both had 20260907.229.1, in the sixth both had 20260922.246.2, and in
+fifth both had 20260907.229.1, in the sixth both had 20260922.246.2, in
 the seventh the board job had 20260907.229.1 and the `msrv` job
-20260922.246.2 again -- the `-latest` trade the workflow's head makes,
-recorded by the runs themselves.
+20260922.246.2 again, and in the eighth both had 20260922.246.2 -- the
+`-latest` trade the workflow's head makes, recorded by the runs themselves.
 
 The first run's four reds were two findings, both in the test tree and both
 fixed at their sites: three invariant guards demanded `pty::` tests that
