@@ -980,13 +980,19 @@ in the command layer outlives `cli::run` and every scratch directory is
 unique, so the likely holder is another test thread's child caught mid-spawn,
 whose descriptor table holds a copy of every descriptor the test process has
 open, the lock's included, until its exec closes them; `flock` belongs to
-the open file description, so a copy keeps the lock. That is inferred and
-not measured. It is a race of the test process, which spawns children from
+the open file description, so a copy keeps the lock. That was inferred
+here, and Rep-0 has since measured it on one macOS host, not on a runner:
+`std` spawned through `posix_spawn`, and dropping a store and opening it
+again at once met `Locked` beside threads spawning children and never
+without them. It is a race of the test process, which spawns children from
 parallel threads, and not of the wallet, whose binary has no second thread
 to take the lock while it spawns. The job's re-run at the same commit, on
 the same image, passed 400 with that test green. The test is Rep-0's, in
-`tests/cli.rs`, which this tree does not change, so the remedy is Rep-0's
-to make.
+`tests/cli.rs`, which this tree does not change, so the remedy was Rep-0's
+to make: `ed4bb33` takes the test's hold, and its read-back after the
+release, through the harness's `reopen`, which retries `Locked` alone,
+bounded, and reports every retry. It came down in `cc39bb8`, and no runner
+has run it yet.
 
 The hosts were Linux 6.17 on x86_64, Darwin 25.6 on arm64 and Windows
 10.0.26100 on x86_64. `macos26` was 20260907.0351.1 throughout; `ubuntu24`
