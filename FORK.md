@@ -872,7 +872,7 @@ the branch is pushed alone. Its Linux and macOS jobs are coverage Rep-0 lacks
 as much as this tree does. If Rep-0 takes a workflow of its own, it is made
 there and flows down, and this file keeps only what Windows adds.
 
-**Six runs, 2026-09-24 and 25.** Each figure is summed from that job's own
+**Seven runs, 2026-09-24 and 25.** Each figure is summed from that job's own
 seventeen result lines, read with `gh run view <run> --job <job> --log`:
 
 | run | commit | Linux | macOS | Windows |
@@ -883,6 +883,7 @@ seventeen result lines, read with `gh run view <run> --job <job> --log`:
 | 36073146927 | `7e45af7` | green, 393 passed | green, 393 passed | green, 375 passed |
 | 36091463164 | `7ca154d` | green, 393 passed | green, 393 passed | green, 375 passed |
 | 36095852071 | `764e7be` | green, 400 passed | green, 400 passed | green, 382 passed |
+| 36106141274 | `cb933ce` | green, 400 passed | seven rows green; `test` red, 399 passed and 1 failed; re-run green, 400 passed | green, 382 passed |
 
 Nothing was ignored on any platform. Windows runs eighteen fewer: the
 `pty::` tests its gate removes. The third run is of the tree after Rep-0's
@@ -902,16 +903,37 @@ the slot layout, R1-3's close: seven more tests on every platform, the
 reading rule's unit tests, which is why Linux and macOS pass 400 and Windows
 382, and on Windows the layout's own forms of the I3 and I2 proofs and of the
 keystore tests the rename layout's steps shaped; the `msrv` job is green on
-all three again.
+all three again. The seventh runs Rep-0's `rustls` 0.23.45, merged down in
+`be28279`: the Windows `clippy: mesh-https` and `build: shipped` rows
+compiled it natively, and the `msrv` job compiled it on 1.89.0 on all three
+and is green on each.
+
+The seventh's one red was on macOS, in
+`pty::submit_on_a_real_pty_ships_a_saved_artifact_and_opens_no_store`, and
+before the binary ran: the test's own `Keystore::open`, which holds the
+store's lock for the rest of the test, was refused as locked, a moment after
+the in-process `send` that made the store had dropped its handle. Nothing
+in the command layer outlives `cli::run` and every scratch directory is
+unique, so the likely holder is another test thread's child caught mid-spawn,
+whose descriptor table holds a copy of every descriptor the test process has
+open, the lock's included, until its exec closes them; `flock` belongs to
+the open file description, so a copy keeps the lock. That is inferred and
+not measured. It is a race of the test process, which spawns children from
+parallel threads, and not of the wallet, whose binary has no second thread
+to take the lock while it spawns. The job's re-run at the same commit, on
+the same image, passed 400 with that test green. The test is Rep-0's, in
+`tests/cli.rs`, which this tree does not change, so the remedy is Rep-0's
+to make.
 
 The hosts were Linux 6.17 on x86_64, Darwin 25.6 on arm64 and Windows
 10.0.26100 on x86_64. `macos26` was 20260907.0351.1 throughout; `ubuntu24`
 moved from 20260907.300.1 to 20260920.314.1 after the first run; and within
 each of the third and fourth runs the Windows board job had `win25-vs2026`
 20260907.229.1 while the Windows `msrv` job had 20260922.246.2, where in the
-fifth both had 20260907.229.1 and in the sixth both had 20260922.246.2 --
-the `-latest` trade the workflow's head makes, recorded by the runs
-themselves.
+fifth both had 20260907.229.1, in the sixth both had 20260922.246.2, and in
+the seventh the board job had 20260907.229.1 and the `msrv` job
+20260922.246.2 again -- the `-latest` trade the workflow's head makes,
+recorded by the runs themselves.
 
 The first run's four reds were two findings, both in the test tree and both
 fixed at their sites: three invariant guards demanded `pty::` tests that
@@ -987,8 +1009,9 @@ carried the same line, so the change was made there, as `4a3e420`, and came
 down in `be28279`, whose change to this tree has the same `git patch-id
 --stable` as Rep-0's commit. On the merge, `cargo deny check` reads
 `advisories ok, bans ok, licenses ok, sources ok` on this macOS host, and
-both of `RELEASE.md`'s MSRV commands exit 0 on 1.89.0. No Windows row has
-compiled 0.23.45 yet.
+both of `RELEASE.md`'s MSRV commands exit 0 on 1.89.0. The seventh run
+above compiled it on all three platforms, Windows included, and on 1.89.0
+in the `msrv` job on each.
 
 ### R1-7 -- the surface check **(done, 2026-09-22)**
 
