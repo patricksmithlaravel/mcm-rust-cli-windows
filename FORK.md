@@ -429,7 +429,7 @@ Note what `perms.rs` records about the public surface: `Error::UnsafePermissions
 carries `mode: u32` and renders it as octal. A second implementation either
 reports a Unix mode it did not measure or changes a public variant.
 
-### R1-3 -- `fsync_dir`, which is the one that matters **(done, 2026-09-22; exercised on a Windows runner, 2026-09-24; power loss unmeasured)**
+### R1-3 -- `fsync_dir`, which is the one that matters **(done, 2026-09-22; exercised on a Windows runner, 2026-09-24; power loss unmeasured, and a release gate)**
 
 `medium.rs`'s fourth durable step opens the directory and `sync_all`s it. On
 Windows that **compiles and fails at runtime**: `File::open` on a directory is
@@ -446,6 +446,18 @@ refused at the site, and the hazard is written as one: a power cut before
 NTFS flushes its log can bring back the previous snapshot, and with it the
 chance to sign a reserved position twice. The README tells a Windows operator
 what to do after a power cut.
+
+**Decided, 2026-09-24: stated for the merge, closed before a release.**
+Phase 1 goes into Rep-1's `main` with the hazard stated as above, and
+`RELEASE.md` carries closing it as a gate, so no tag is cut while it stands.
+Two routes close it. One is the measurement the site names: a power-cut test
+on NTFS under each refused candidate, on a Windows machine or a VM that can be
+powered off hard, which no hosted runner can do. The other removes the
+dependence instead of measuring it: on Windows, write each new version into
+one of two files that already exist -- alternating slots with a sequence
+number, flushed in place with `FlushFileBuffers`, which is documented -- so no
+directory entry is left to lose. The second is unevaluated; it changes how
+the store is written on Windows and would owe a crash argument of its own.
 
 ### R1-4 -- rename under a sharing violation **(done, 2026-09-22; measured on a Windows runner, 2026-09-24)**
 

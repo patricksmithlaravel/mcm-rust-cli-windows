@@ -18,6 +18,17 @@ run, on every platform, at the commit being tagged.
 - [ ] `./board verify` is **green on macOS**. Record the run below.
 - [ ] `./board verify` is **green on Windows**, run from Git Bash as the
       board's head describes. Record the run below.
+- [ ] **The Windows power-loss hazard is closed.** On Windows the fourth
+      durable step performs no I/O, so a power cut or an operating-system
+      crash before NTFS flushes its log can bring back the previous snapshot,
+      and with it the chance to sign a reserved key position twice.
+      `keystore/medium.rs` states the hazard at `fsync_dir`'s Windows arm, and
+      `README.md` tells an operator what to do after a power cut. That is
+      enough for the tree to carry the Windows build and not enough to release
+      it: no tag is cut while this box is open. It closes when a commit either
+      removes the store's dependence on the rename's durability on Windows or
+      measures a substitute on NTFS under power cuts, and says which at that
+      arm. `FORK.md`, under R1-3, has the two routes.
 - [ ] The board's figures in `AGENT.md` match the run that just happened --
       the per-target counts and the wall time, re-derived from the run being
       reported. AGENT.md's own rule governs: the total is summed from that
