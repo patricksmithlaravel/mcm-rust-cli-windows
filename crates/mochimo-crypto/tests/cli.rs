@@ -5524,7 +5524,41 @@ mod pty {
     #[test]
     fn submit_on_a_real_pty_ships_a_saved_artifact_and_opens_no_store() {
         let (store, artifact) = super::send_that_never_left("pty-submit");
-        let held = Keystore::open(store.path(), &super::keystore_harness::unlock())
+        // **The hold is taken through the harness's `reopen`, not
+        // `Keystore::open`.** The in-process `send` above dropped this store's
+        // handle an instant ago, and this binary runs its tests on parallel
+        // threads that spawn children -- `cargo`, `script`, and itself for the
+        // child sessions. `flock` belongs to the open file description, and a
+        // child keeps a copy of this process's descriptor table from its
+        // creation until its `exec` closes it, so a child that a sibling is
+        // spawning at that instant holds the old description's lock until its
+        // `exec`. A fresh open's `try_lock` then meets a live holder, and
+        // `Locked` is the truth. `reopen` retries `Locked` alone, bounded, and
+        // says so on file descriptor 2 whenever it had to; the mechanism, the
+        // bound and the two tests that pin it are at its doc, and every reopen
+        // outside this module -- twenty-nine calls -- goes through it.
+        //
+        // Two alternatives, refused. A retry written here would be a second
+        // definition of that rule, with its own bound and neither the pinning
+        // tests nor the announcement. A process-wide gate held around every
+        // spawn and across this release would close the window by
+        // construction, but only for the sites wrapped in it and only while
+        // every spawn in this file remembers to take it, which nothing checks;
+        // the other reopens here would still rest on `reopen`, so the file
+        // would carry two mechanisms for one hazard.
+        //
+        // The bound, measured on one macOS host and not on a CI runner, by
+        // probes outside this repository. `Keystore::open` itself, dropping
+        // and re-opening one store beside two threads spawning `/usr/bin/true`,
+        // met `Locked` in 18,117 of 271,730 cycles and in none of 199,321
+        // without them, and every block cleared within five retries of 100 µs.
+        // A bare `try_lock` loop with every core saturated or three times
+        // oversubscribed needed at most 39 of `reopen`'s 50. `std` spawned
+        // through `posix_spawn` there, both for those children and for spawns
+        // shaped like this file's three; only a `pre_exec` closure forced a
+        // fork.
+        let held = super::reopen("pty submit hold", store.path())
+            .result
             .unwrap_or_else(|e| panic!("cannot hold the store's lock: {e}"));
         let ledger = Ledger::serve(addr_at(0), 5_000_000);
         ledger.accept_submits(super::id_for_the_spend("pty-submit-id"));
@@ -5560,7 +5594,9 @@ mod pty {
         );
         assert_eq!(ledger.answered(), 1, "submit made {} request(s); it resolves nothing and submits once", ledger.answered());
         drop(held);
-        let ks = Keystore::open(store.path(), &super::keystore_harness::unlock()).unwrap_or_else(|e| panic!("{e}"));
+        // Released and re-taken at once: the same instant as the hold above,
+        // for the same reason.
+        let ks = super::reopen("pty submit after", store.path()).result.unwrap_or_else(|e| panic!("{e}"));
         let v = ks.view(&TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("gone"));
         assert_eq!(
             (v.wots_index.get(), v.pending.is_some()),
