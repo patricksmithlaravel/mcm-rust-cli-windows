@@ -213,17 +213,20 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 
 | file | the delta | why it cannot be a Rep-0 change |
 | --- | --- | --- |
-| `keystore/perms/windows.rs` | the Windows permission model, a new file | it is the Windows arm; a separate file so `perms.rs` stays the Unix arm and upstream edits to it merge without meeting Windows code |
-| `keystore/slots.rs` | the Windows layout's frame, and the rule by which `open` takes the newer of two slots -- a new file, compiled under `cfg(test)` on every platform | the layout exists because Win32 documents no way to commit a rename, which is Windows' alone; a file of its own so the rule is tested on every board and none of it is Windows code in `medium.rs` or `keystore/mod.rs` |
-| `error.rs` | `UnsafeAcl` and `ReplaceRefused`, both `cfg(windows)` | the evidence a Windows refusal carries has no Unix shape, and `UnsafePermissions`' `mode` would have to be invented to carry it |
+| `keystore/perms/windows.rs` | the Windows permission model, a new file, and the slot files' creation and opening under it, shared for reading alone | it is the Windows arm; a separate file so `perms.rs` stays the Unix arm and upstream edits to it merge without meeting Windows code |
+| `keystore/slots.rs` | the Windows layout's frame, and the rule by which `open` takes the newer of two slots -- a new file, compiled on Windows and under `cfg(test)` on every platform | the layout exists because Win32 documents no way to commit a rename, which is Windows' alone; a file of its own so the rule is tested on every board and none of it is Windows code in `medium.rs` or `keystore/mod.rs` |
+| `error.rs` | `UnsafeAcl` and `HeldOpen`, both `cfg(windows)` | the evidence a Windows refusal carries has no Unix shape, and `UnsafePermissions`' `mode` would have to be invented to carry it |
 | `crates/mochimo-crypto/Cargo.toml` | `windows-sys`, a `cfg(windows)` dependency | the declarations the two Windows arms call |
-| `README.md`, `docs/specification.md` | the platform statements, and the Windows limits an operator must know -- no power-loss flush, a rename another program can refuse | they describe a Windows build Rep-0 does not have |
+| `README.md`, `docs/specification.md` | the platform statements, the slot layout, and the Windows limits an operator must know -- a store that is two files and moves one way, and a store another program holds refused at `open` | they describe a Windows build Rep-0 does not have |
 | `tests/invariants.rs` | two rows in `unsafe_is_confined_to_declared_files` -- the permission model, and the binary's console, held to its `cfg(windows)` `console` module -- and `from_raw_os_error` in the declared unresolved names | neither the Win32 security API nor the console mode has a `std` wrapper, so both are foreign calls or nothing |
-| `tests/invariants.rs` | three rows in `DECLARED_PANIC_SITES` for `keystore/slots.rs`'s tests | the census counts every file under `crates/*/src`, and that file is this tree's |
+| `tests/invariants.rs` | three rows in `DECLARED_PANIC_SITES` for `keystore/slots.rs`'s tests, and the Windows order pin's name among the declared unresolved names | the census counts every file under `crates/*/src`, and that file is this tree's; the pin is Windows' |
+| `tests/invariants.rs` | the I3 and I2 proofs are `cfg(unix)`, each beside a Windows form under the same name that stops the slot layout's two steps and tears the write by sector; the I3 census row's comment says what meets its floor there | the Unix proofs walk the rename's four steps, which Windows no longer takes, and the census asks for the proofs by name on every platform |
 | `tests/invariants.rs` | `the_unix_surface_is_confined_to_the_files_a_port_would_touch` lists the files the port touched, per needle, where upstream lists the four a port would | it is the record of the port; the test keeps its upstream name so that upstream edits to it still merge |
 | `tests/invariants.rs` | its five source walks name files with `/` on every platform | on Windows a relative path joins with `\`, and forty-odd name literals would stop matching |
 | `tests/invariants.rs` | the census's three demands on `pty::` tests, and the run-list witness that names one, are answered where the harness is not built by `census::not_built_here`, which asserts that `tests/cli.rs` still declares the harness behind exactly `cfg(all(unix, not(miri)))` with the test in it; the guard then reports the gap in place of evidence | the harness is `script(1)`, which Windows does not have, so the demand cannot be met there; it is replaced by a check of the declared absence rather than dropped, and on Unix nothing changes |
-| `tests/keystore.rs` | the three mode-bit tests are `cfg(unix)`; three `cfg(windows)` tests measure the access-list refusal, the protected creation and the named rename refusal | mode bits do not exist on Windows, and the Windows claims need a test that runs there |
+| `tests/keystore.rs` | the three mode-bit tests are `cfg(unix)`; three `cfg(windows)` tests measure the access-list refusal, the protected creation and a held slot refused at `open`. The four-step sequence and the poisoned handle are `cfg(unix)` beside Windows forms, the lock test's live holder is staged without a store on Windows, the at-rest scan covers both slot files, and one arm reads its store under its own password | mode bits do not exist on Windows, a Windows store is two slots written in place, and the Windows claims need tests that run there |
+| `tests/support/keystore_harness.rs` | `snapshot_bytes` and `write_snapshot` have Windows arms -- the image `open` would take, and a store in the rename layout holding the bytes given -- beside `snapshot_bytes_under` and `slot_bytes` | a Windows store is two files, and the tests that compare, parse or damage a snapshot mean its image; `tests/cli.rs` goes on reading them unchanged |
+| `tests/compile_fail.rs`, `ui/fail/medium_slot_steps_are_not_reorderable.rs` | the medium's order pin is registered per platform, and the slot steps have a pin of their own | each platform's `Medium` has only its own steps, so each pin names methods the other does not have |
 | `tests/cli.rs` | one attribute: the `pty` module is `cfg(all(unix, not(miri)))` | its harness is `script(1)`; no assertion changes, which is what the rule about this file protects |
 | `tests/mesh_http.rs` | the refused-connection test has its own five-second connect timeout in place of the shared 500 ms | Windows retries a connect a port refused before reporting it, and on a Windows runner the shared timeout ran out first; Linux and macOS refuse at once, so on Rep-0's platforms the change is inert |
 | `.gitattributes` | every text file checked out with LF, and no `.bin` file converted in either direction | Git for Windows checks out CRLF by default, and the source scans, the JSON fixtures and the trybuild expectations are read byte for byte; two `.bin` fixtures are printable text to git's detection, so the binary files are named rather than detected |
@@ -431,7 +434,7 @@ Note what `perms.rs` records about the public surface: `Error::UnsafePermissions
 carries `mode: u32` and renders it as octal. A second implementation either
 reports a Unix mode it did not measure or changes a public variant.
 
-### R1-3 -- `fsync_dir`, which is the one that matters **(done, 2026-09-22; exercised on a Windows runner, 2026-09-24; power loss unmeasured, and a release gate)**
+### R1-3 -- `fsync_dir`, which is the one that matters **(done, 2026-09-22; closed on Windows by the slot layout, 2026-09-25, run green on a Windows runner)**
 
 `medium.rs`'s fourth durable step opens the directory and `sync_all`s it. On
 Windows that **compiles and fails at runtime**: `File::open` on a directory is
@@ -459,10 +462,20 @@ dependence instead of measuring it: on Windows, write each new version into
 one of two files that already exist -- alternating slots with a sequence
 number, flushed in place with `FlushFileBuffers`, which is documented -- so no
 directory entry is left to lose. The second is designed below, approved,
-and being built; it changes how the store is written on Windows, and the
-design is the crash argument it owes.
+and built; it changes how the store is written on Windows, and the design is
+the crash argument it owes.
 
-#### Route A, designed: two slots written in place **(approved, 2026-09-24; the reading rule built, the write path not yet)**
+**Closed on Windows, 2026-09-25, by the second route.** The slot layout is
+built -- the reading rule in `2c35e02`, the write path in `764e7be` -- and
+its first run on a Windows runner is green; the section below and R1-6 have
+the run. On Windows the store no longer depends on the directory entry a
+rename writes. What its power-loss claim rests on instead is the flush of a
+slot written in place, which Microsoft documents, and a device that honours
+it, which nothing can document: the footing an `fsync` gives the Unix path.
+The paragraphs above state the hazard as it stood before; `RELEASE.md`'s gate
+now says what a person checks at a tag.
+
+#### Route A, designed: two slots written in place **(approved, 2026-09-24; built, and run green on a Windows runner, 2026-09-25)**
 
 The second route above, carried as far as a design can be judged without
 code; what of it is built, and what has run, is said at the section's foot.
@@ -748,7 +761,30 @@ a frame, every sector-by-sector mix of an old frame and a new one at both
 lengths, and each of forty-nine pairs of slot states against what `take` must
 make of it -- before any Windows code calls it.
 
-### R1-4 -- rename under a sharing violation **(done, 2026-09-22; measured on a Windows runner, 2026-09-24)**
+**The write path is built second**, in `764e7be`: Windows' `Medium` as a
+trait of its own, with `write_slot`, `flush_slot` and `flush_standing`, and
+its instrument's torn-write injection; `perms`' slot files, created under the
+protected list and held sharing read alone; the keystore's Windows `open`
+and commit; and `Error::HeldOpen` in `ReplaceRefused`'s place. What the
+design above left to it: the order pin is registered per platform in
+`tests/compile_fail.rs`, and the harness reads a store's image without a key
+when one slot holds it and orders two through `keystore::newest_image`,
+public on Windows alone, for the tests.
+
+**Run on a Windows runner, 2026-09-25**: run 36095852071 at `764e7be`, green
+in all six jobs, the first execution of the layout anywhere but this host's
+unit tests. The I3 and I2 proofs ran in their slot-layout forms and passed,
+their census guards with them: each commit stopped after each of its two
+steps, and its write torn in every mix of its sectors at both lengths,
+reopened fully pre or fully post -- post only once the write was whole -- and
+no receipt escaped. A slot held by another program was refused at `open` as
+`HeldOpen`, the medium's calls were the two steps with their arguments, and
+the Windows order pin's expected output, normalised by hand from a compile
+for that target, matched. What the run cannot say is what no hosted runner
+can: a real power cut, an unelevated desktop, and a scanner, since real-time
+protection is off on the image.
+
+### R1-4 -- rename under a sharing violation **(done, 2026-09-22; measured on a Windows runner, 2026-09-24; no rename on Windows since the slot layout, and the refusal met at `open`)**
 
 `fs::rename` over an existing file maps to a replacing move on Windows, which
 fails while another process holds the target open without delete sharing --
@@ -766,6 +802,14 @@ another process holds open sharing read only:
 green there, so the commit is refused as `ReplaceRefused`, the snapshot is
 unchanged and the handle is poisoned. That is one build of one Windows, and a
 holder that shares delete is not measured.
+
+**With the slot layout, 2026-09-24, Windows renames nothing**, so no commit
+can meet this refusal. `open` holds both slot files for writing, shared for
+reading alone, and a program already holding one without sharing write is
+refused there as `Error::HeldOpen` -- before anything is read or reserved, so
+there is no handle to poison -- while a program that comes later cannot open
+a held slot for writing at all. `ReplaceRefused` is gone with the rename, and
+the held-snapshot test with it; the held-slot test replaces both.
 
 ### R1-5 -- the binary **(done, 2026-09-22; built on a Windows runner, never run there)**
 
@@ -828,7 +872,7 @@ the branch is pushed alone. Its Linux and macOS jobs are coverage Rep-0 lacks
 as much as this tree does. If Rep-0 takes a workflow of its own, it is made
 there and flows down, and this file keeps only what Windows adds.
 
-**Five runs, 2026-09-24.** Each figure is summed from that job's own
+**Six runs, 2026-09-24 and 25.** Each figure is summed from that job's own
 seventeen result lines, read with `gh run view <run> --job <job> --log`:
 
 | run | commit | Linux | macOS | Windows |
@@ -838,6 +882,7 @@ seventeen result lines, read with `gh run view <run> --job <job> --log`:
 | 36068611866 | `62fcca2` | green, 393 passed | green, 393 passed | green, 375 passed |
 | 36073146927 | `7e45af7` | green, 393 passed | green, 393 passed | green, 375 passed |
 | 36091463164 | `7ca154d` | green, 393 passed | green, 393 passed | green, 375 passed |
+| 36095852071 | `764e7be` | green, 400 passed | green, 400 passed | green, 382 passed |
 
 Nothing was ignored on any platform. Windows runs eighteen fewer: the
 `pty::` tests its gate removes. The third run is of the tree after Rep-0's
@@ -852,15 +897,21 @@ held to its console module: both are green on Windows, and the `msrv` job is
 green again on all three. The fifth runs the console that takes a `Ctrl-Z`
 as the end of input only at a line's start, R1-5's decision: the Windows
 `clippy: mesh-https` and `build: shipped` rows compiled the changed module
-natively, and the `msrv` job is green on all three once more.
+natively, and the `msrv` job is green on all three once more. The sixth runs
+the slot layout, R1-3's close: seven more tests on every platform, the
+reading rule's unit tests, which is why Linux and macOS pass 400 and Windows
+382, and on Windows the layout's own forms of the I3 and I2 proofs and of the
+keystore tests the rename layout's steps shaped; the `msrv` job is green on
+all three again.
 
 The hosts were Linux 6.17 on x86_64, Darwin 25.6 on arm64 and Windows
 10.0.26100 on x86_64. `macos26` was 20260907.0351.1 throughout; `ubuntu24`
 moved from 20260907.300.1 to 20260920.314.1 after the first run; and within
 each of the third and fourth runs the Windows board job had `win25-vs2026`
 20260907.229.1 while the Windows `msrv` job had 20260922.246.2, where in the
-fifth both had 20260907.229.1 -- the `-latest` trade the workflow's head
-makes, recorded by the runs themselves.
+fifth both had 20260907.229.1 and in the sixth both had 20260922.246.2 --
+the `-latest` trade the workflow's head makes, recorded by the runs
+themselves.
 
 The first run's four reds were two findings, both in the test tree and both
 fixed at their sites: three invariant guards demanded `pty::` tests that

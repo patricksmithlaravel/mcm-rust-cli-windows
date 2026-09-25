@@ -18,17 +18,17 @@ run, on every platform, at the commit being tagged.
 - [ ] `./board verify` is **green on macOS**. Record the run below.
 - [ ] `./board verify` is **green on Windows**, run from Git Bash as the
       board's head describes. Record the run below.
-- [ ] **The Windows power-loss hazard is closed.** On Windows the fourth
-      durable step performs no I/O, so a power cut or an operating-system
-      crash before NTFS flushes its log can bring back the previous snapshot,
-      and with it the chance to sign a reserved key position twice.
-      `keystore/medium.rs` states the hazard at `fsync_dir`'s Windows arm, and
-      `README.md` tells an operator what to do after a power cut. That is
-      enough for the tree to carry the Windows build and not enough to release
-      it: no tag is cut while this box is open. It closes when a commit either
-      removes the store's dependence on the rename's durability on Windows or
-      measures a substitute on NTFS under power cuts, and says which at that
-      arm. `FORK.md`, under R1-3, has the two routes.
+- [ ] **The Windows power-loss hazard is closed, at the commit being
+      tagged.** The hazard was a directory entry nothing could flush: a power
+      cut before NTFS committed a rename could bring back the previous
+      snapshot, and with it the chance to sign a reserved key position twice.
+      The slot layout removes that dependence -- a Windows store is two files
+      rewritten in place and flushed with `FlushFileBuffers` before a change
+      is durable -- and `keystore/medium.rs`'s module doc says what it rests
+      on instead. Tick this when the commit being tagged still writes that
+      layout and its Windows board, part of the gate above, runs the layout's
+      I3 and I2 proofs green: stops after each step, and writes torn by
+      sector. `FORK.md`, under R1-3, has the design and the runs.
 - [ ] The board's figures in `AGENT.md` match the run that just happened --
       the per-target counts and the wall time, re-derived from the run being
       reported. AGENT.md's own rule governs: the total is summed from that
@@ -93,11 +93,15 @@ the divergence is documented in the code rather than assumed away:
 
 On Windows the same three are different in kind, not only in degree:
 
-- **There is no directory flush.** `fsync_dir`'s Windows arm performs no I/O,
-  because Win32 documents no call that commits a directory entry on NTFS, and
-  it says what that leaves: the power-loss half of I3 has no mechanism there.
-  A green Windows board establishes nothing about power loss, and nothing on
-  this checklist could.
+- **There is no rename.** Win32 documents no way to commit the directory
+  entry a rename writes, so a Windows store is two slot files: a commit
+  rewrites the one not holding the newest state and flushes it with
+  `FlushFileBuffers`, which writes a file's data and metadata, before the
+  change is taken as durable, and `open` takes the newer intact slot. A green
+  Windows board establishes that layout under kills and under writes torn by
+  sector; that a flush which returned survives a power cut is the
+  documentation's claim and the device's, as an `fsync`'s is on Unix, and
+  nothing on this checklist measures it.
 - **The lock is `LockFileEx`.** The system releases a terminated process's
   locks, after a delay Microsoft documents as depending on system resources,
   so a lock can briefly outlive its holder -- met as `Locked`, and gone on a

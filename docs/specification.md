@@ -813,6 +813,8 @@ A keystore is a directory holding three files:
 | `accounts.mks.tmp` | the staging file a commit writes before renaming it over the snapshot. It exists for the length of a commit, and outlives one only when a commit was interrupted; `open` unlinks a leftover before reading, and every commit unlinks one before creating its own, so a leftover is never adopted and its mode is never inherited |
 | `keystore.lock` | a file nothing ever writes to, held with `flock(2)` for the life of an open handle |
 
+On Windows the directory holds `accounts.mks` and `accounts.mks.1` beside the lock file, and never a staging file: two slots, each one frame around an image in the layout below, and a commit rewrites one of them in place. *How a file is replaced* describes the frame and which slot `open` takes.
+
 The snapshot is one whole-state image, not a log: every write re-encodes every account. All integers in it are little-endian and every field is fixed-width, so the image length is a closed formula of the account count and the parser bounds every read before it happens.
 
 No fixture group covers this file. The fixture corpus pins protocol bytes; the keystore is wallet-local. What pins the keystore is a set of captured images (below) and the two published vectors the primitives are replayed against.
@@ -1031,9 +1033,9 @@ On Windows the same call is `LockFileEx`, exclusive and failing immediately, and
 
 ### What `open` and `create` refuse
 
-`open` refuses a group- or other-writable directory (`UnsafePermissions`, carrying the mode; on Windows, a directory anyone but this user, `SYSTEM` or the Administrators group can write to, or that another user owns — `UnsafeAcl`, carrying the trustee and the rights), a directory with no snapshot (`Missing` — an absent file is not an empty store), a live lock holder (`Locked`), and a snapshot that grows between its `stat` and its read (corrupt at `snapshot grew while being read`). A stale `accounts.mks.tmp` is unlinked after the lock is taken and is never adopted, even when it would parse: two files must never both be authorities.
+`open` refuses a group- or other-writable directory (`UnsafePermissions`, carrying the mode; on Windows, a directory anyone but this user, `SYSTEM` or the Administrators group can write to, or that another user owns — `UnsafeAcl`, carrying the trustee and the rights), a directory with no snapshot (`Missing` — an absent file is not an empty store), a live lock holder (`Locked`), and a snapshot that grows between its `stat` and its read (corrupt at `snapshot grew while being read`). A stale `accounts.mks.tmp` is unlinked after the lock is taken and is never adopted, even when it would parse: two files must never both be authorities. On Windows `open` does read two files, the slots, and takes one of them by the rule under *How a file is replaced*; it also refuses a slot file another program holds open without sharing write (`HeldOpen`, before anything is read), a frame in `accounts.mks` with no `accounts.mks.1` beside it, two slots whose headers disagree on the salt or the key derivation, two images at one generation, and a store with no intact image in either slot — each of them corrupt, naming which.
 
-`create` makes the directory with mode 0700 if it is absent (on Windows, under a protected access list granting this user alone, inherited by what is created inside it), refuses a group- or other-writable directory, refuses a directory that already holds a snapshot (`Exists`), refuses a live lock holder, and asks the existence question again under the lock before sealing anything. It does not unlink a stale `accounts.mks.tmp` itself; its first commit does, as every commit does.
+`create` makes the directory with mode 0700 if it is absent (on Windows, under a protected access list granting this user alone, inherited by what is created inside it), refuses a group- or other-writable directory, refuses a directory that already holds a snapshot (`Exists`), refuses a live lock holder, and asks the existence question again under the lock before sealing anything. It does not unlink a stale `accounts.mks.tmp` itself; its first commit does, as every commit does. On Windows it refuses a directory holding `accounts.mks.1` as well, as a snapshot: a `create` cut short leaves that file alone, and so does a store whose `accounts.mks` was deleted by hand, whose last copy it may be.
 
 ### How a file is replaced
 
@@ -1043,7 +1045,23 @@ If any step fails, the handle is poisoned: every later call that reads or writes
 
 On Unix this relies on POSIX rename atomicity, directory `fsync` and `flock`. Two limits are stated rather than detected: it does not survive an `fsync` that lies, and rename atomicity is not detectable from the standard library on FAT, exFAT or FUSE.
 
-On Windows the temp is created under a protected access list granting this user alone, and the snapshot keeps that list through the rename. The rename is `MoveFileExW` replacing the target, relied on to be atomic on NTFS as the rename is on the Unix filesystems above, which Win32 does not document either. **The fourth step flushes nothing on Windows**: Win32 documents no call that commits a directory entry on NTFS, so the step performs no I/O and the power-loss half of I3 has no mechanism behind it there. A power cut or an operating-system crash before NTFS flushes its log can bring back the previous snapshot; if the lost commit reserved a key whose spend has not settled, the next spend can sign the same position, and reconciliation catches that only once the first spend is on the chain. `keystore::medium::Disk::fsync_dir`'s Windows arm weighs the two candidate substitutes and says why each is refused. A rename refused because another process holds the snapshot or the temp open without delete sharing is `ReplaceRefused`; it changes nothing, and the handle is poisoned as after any failed step.
+**On Windows nothing is renamed.** Win32 documents no way to commit the directory entry a rename writes, so a Windows store is two slot files, `accounts.mks` (slot 0) and `accounts.mks.1` (slot 1), each holding one frame and nothing after it:
+
+| field | width | what it is |
+| --- | --- | --- |
+| magic | 8 | `MCMKSLOT` |
+| frame version | 2 | 1 |
+| payload length | 4 | 0 for the vacant frame |
+| payload | the length | in version 1, one whole image in the layout above, or nothing |
+| check | 32 | SHA3-256 over every byte before it |
+
+A slot file's length is 46 bytes more than its payload's, and a slot of any other length, or whose check fails, is torn. Only the payload is versioned: the magic, the version, the length and the check keep their places in every frame version, so a build can verify the check of a frame it did not write and refuse an intact frame of a later version, instead of calling it torn. The check is keyless — it sorts the slots before any key exists, and a torn slot is what a crash leaves — and it is no authentication: an intact frame whose image then fails its tag is refused as `WrongPassword`, as a damaged snapshot is.
+
+A commit frames the new image and writes it into the slot that does not hold the newest one, from offset 0, sets the file's length to the frame's, and flushes it with `FlushFileBuffers`; only then is the durability witness minted. A handle's first commit first flushes the newest slot as it found it, so that a slot is never overwritten while the other might still be only in the cache. `create` writes its first image into slot 1 and then makes `accounts.mks` the vacant frame, each flushed, so the snapshot's name existing means an image is on the device. A slot file is created only then, or when a store in the rename layout — copied from Unix, or made by a build before this layout — takes its first commit on Windows: that commit writes slot 1, flushes it, and only then overwrites `accounts.mks` with the vacant frame, after which a build that reads only the rename layout refuses the store at its magic.
+
+`open` reads both slots through handles it holds for the handle's life, opened for writing and shared for reading alone, so no other process can write, rename or delete a slot while a handle lives. With no intact image in either frame, `accounts.mks` is read exactly as the rename layout reads a snapshot. Otherwise every intact image is decrypted under one key and the one with the higher generation is the store; the generation is in the ciphertext, which is why both are decrypted rather than a counter kept in the clear. A plain `accounts.mks` beside an intact slot 1 is taken if it decrypts and parses and is otherwise the torn remainder of an overwrite, since a plain image is overwritten only after slot 1 holds a flushed frame.
+
+What this rests on is that a flush which returned is on the device: `FlushFileBuffers` writes a file's buffered data and metadata, and the documentation gives a file just created as its example of metadata that needs it. A device that acknowledges a flush it did not perform defeats this as an `fsync` that lies defeats the Unix path. The store directory's own entry in its parent is flushed by nothing, here or on Unix.
 
 The build refuses to compile for any target that is neither Unix nor Windows.
 
@@ -1581,7 +1599,7 @@ A crash between signing and persisting leaves the on-disk position pointing at a
 
 **Mechanism.** The witness token, plus a source scan that holds its construction count at exactly one and at the commit function. Items under a test configuration are excluded on purpose — the receipt's own unit tests need a witness, and a test-only mint cannot reach a release build. The behavioural proof drives four interruption points between the first write and the receipt's return, restarts from the on-disk state, and shows the previous position unreachable with no receipt escaped.
 
-**Limit, stated.** The crash model is a kill at a syscall boundary: everything a completed syscall left behind is visible to the reopen. Power loss, an `fsync` that returns success without flushing, and page loss after an I/O error are outside what anything here establishes. There is no oracle for this property and there cannot be one — the reference is a node and persists a ledger, not a key position.
+**Limit, stated.** The crash model is a kill at a syscall boundary: everything a completed syscall left behind is visible to the reopen. Power loss, an `fsync` that returns success without flushing, and page loss after an I/O error are outside what anything here establishes. On Windows the proof also tears the commit's write — what a power cut can leave of a write not yet flushed — and no receipt escapes those either; a flushed write lost is outside it there too. There is no oracle for this property and there cannot be one — the reference is a node and persists a ledger, not a key position.
 
 ### I3 — spend-related state advances atomically
 
@@ -1591,7 +1609,7 @@ The account's key position, the store generation, the open reservation and the r
 
 **Limit.** The same crash model as I2. Nothing mechanical fixes the membership of "spend-related state": a fifth member added later is covered by this invariant's prose and by no check here.
 
-**On Windows, the power-loss half has no mechanism.** I2 already places power loss outside what anything here establishes; on Unix the directory `fsync` is the mechanism aimed at it, untested against a real power cut. On Windows the fourth step performs no I/O, because Win32 documents no call that commits a directory entry on NTFS, so there is not even a mechanism to leave untested. *How a file is replaced* states the hazard that leaves.
+**On Windows the steps are two, and the mechanism is the flush of a slot written in place.** I2 already places power loss outside what anything here establishes; on Unix the directory `fsync` is the mechanism aimed at it, on Windows the flush of the slot just written, and neither is tested against a real power cut. The Windows proof stops each commit after each of its two steps and also tears its write in every mix of old and new sectors — what a power cut can leave of a write not yet flushed — and finds every member fully pre or fully post each time. *How a file is replaced* describes the layout.
 
 ### I4 — every account reconciles before that account acts
 
@@ -1687,7 +1705,7 @@ Three things make it so, and none of them is a convenience:
 | where the password and the recovery phrase are read, so that neither can be piped or redirected | `/dev/tty`, opened by path; echo turned off by `stty` | the console's own buffers, `CONIN$` and `CONOUT$`, opened by name; echo turned off in the console mode; read and written as UTF-16, so a password is the same bytes on every platform |
 | the salt and the nonce seed the binary supplies to the keystore | `/dev/urandom`, read through `std::fs` | `BCryptGenRandom`, the system-preferred generator |
 
-The keystore additionally rests on storage primitives that are not the same on the two, which is why that module carries its own statement: on Unix, POSIX rename atomicity, directory `fsync` and `flock`; on Windows, the replacing move, `LockFileEx`, and no directory flush at all — *How a file is replaced* says what that last one leaves.
+The keystore additionally rests on storage primitives that are not the same on the two, which is why that module carries its own statement: on Unix, POSIX rename atomicity, directory `fsync` and `flock`; on Windows, two slot files flushed in place with `FlushFileBuffers`, and `LockFileEx` — *How a file is replaced* says why there are two.
 
 The BSDs have all of these. Nothing in this repository builds or tests against them, so they are neither supported nor known to fail.
 
