@@ -30,9 +30,14 @@
 //! # Two arms, one set of names
 //!
 //! The functions below are the Unix arm. The Windows arm is [`windows`], a
-//! file of its own, and it supplies the same four functions under the same
-//! names and signatures, so no caller in `keystore` carries a `cfg`: the
-//! platform is decided here and nowhere above. **There is no trait**, because
+//! file of its own, and it supplies three of them -- `refuse_unsafe_dir`,
+//! `create_private_dir` and `open_private_lock` -- under the same names and
+//! signatures, so no caller of those carries a `cfg`: the platform is decided
+//! here and nowhere above. The fourth, `create_private_file`, makes the temp
+//! the rename layout replaces the snapshot with, and a Windows store has no
+//! temp; in its place that arm has `create_slot` and `open_slot`, the slot
+//! layout's two files, which only the layout's Windows code calls. **There is
+//! no trait**, because
 //! nothing ever chooses between the arms at run time -- a build has exactly
 //! one, and a trait would be an interface with one implementation per binary.
 //!
@@ -44,8 +49,9 @@
 //! What the arms share is the standard, not the mechanism: each makes a
 //! directory and files only its owner can reach, and each refuses a
 //! directory another local user can write to. How far the second arm is
-//! established is stated at its head, and the short answer is that it
-//! compiles.
+//! established is stated at its head: its tests pass on a Windows runner, and
+//! what that runner is not -- an unelevated desktop with a scanner running --
+//! it does not establish.
 //!
 //! # The shape of the public error, stated because it is not obvious
 //!
@@ -73,7 +79,7 @@ use crate::error::{Error, Result};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::{create_private_dir, create_private_file, open_private_lock, refuse_unsafe_dir};
+pub(crate) use windows::{create_private_dir, create_slot, open_private_lock, open_slot, refuse_unsafe_dir};
 
 /// The mode every file this crate creates is created with: owner read and
 /// write, nothing for anyone else.

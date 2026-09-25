@@ -920,7 +920,7 @@ mod census {
             bin: "compile_fail",
             tier: Tier::Executed,
             evidence: "compile-fail partition:",
-            floor: 4, // the largest integer printed is the fail-case total; 18 today
+            floor: 4, // the largest integer printed is the fail-case total; 19 today, 18 of them registered on each platform
         },
         Row {
             guard: "zeroization_has_no_reference_counterpart",
@@ -1045,7 +1045,7 @@ mod census {
             bin: "invariants",
             tier: Tier::Executed,
             evidence: "I3 atomicity:",
-            floor: 4, // temp write, fsync file, rename, fsync dir -- I3's own clause
+            floor: 4, // temp write, fsync file, rename, fsync dir -- I3's own clause; on Windows two steps over two commits
         },
         Row {
             guard: "startup_refuses_divergence_at_the_wallet_layer_not_at_the_keystore",
@@ -2079,18 +2079,20 @@ fn key_signs_once_per_keystore_with_the_raw_signer_crate_private_not_absent() {
 ///
 /// * `std::os::unix` -- `keystore/perms.rs`, the Unix permission model.
 /// * `std::os::windows` and `windows_sys` -- `keystore/perms/windows.rs`, the
-///   Windows permission model; `bin/mcm-wallet.rs`, the console and the
-///   generator; and, for `windows_sys` alone, `keystore/medium.rs`, which
-///   names the two error codes a held file produces on a replacing move.
+///   Windows permission model and the slot files' opening and creation; and
+///   `bin/mcm-wallet.rs`, the console and the generator.
 /// * `/dev/` and `"stty"` -- `bin/mcm-wallet.rs`. The library reaches neither:
 ///   entropy is a parameter and the prompts go through `cli::create::Terminal`.
 /// * `cfg(unix)` and `cfg(windows)` -- the files holding a per-platform arm.
 ///   `medium.rs` is here though no platform API is named in its Unix arm: its
 ///   sites are `std::fs` calls that compile everywhere and behave differently,
 ///   which a scan by API name cannot find, so the arm's attribute is what
-///   makes it enumerable at all. `error.rs` is here for its two Windows-only
+///   makes it enumerable at all; its Windows arm is the slot layout's steps.
+///   `keystore/mod.rs` is here for the slot layout's reading and commit on
+///   Windows, beside the Unix arm's, and `error.rs` for its two Windows-only
 ///   variants. `perms/windows.rs` is not, because it is gated whole at its
-///   `mod` line in `perms.rs`.
+///   `mod` line in `perms.rs`, and neither is `keystore/slots.rs`, which is
+///   compiled on Windows and under test everywhere and names no platform.
 /// * `cfg(not(any(unix, windows)))` -- `lib.rs` and `keystore/mod.rs`, the two
 ///   gates that refuse every other target.
 ///
@@ -2118,11 +2120,11 @@ fn the_unix_surface_is_confined_to_the_files_a_port_would_touch() {
     const SURFACE: [(&str, &[&str]); 8] = [
         ("std::os::unix", &[PERMS]),
         ("std::os::windows", &[PERMS_WINDOWS, BIN]),
-        ("windows_sys", &[PERMS_WINDOWS, MEDIUM, BIN]),
+        ("windows_sys", &[PERMS_WINDOWS, BIN]),
         ("/dev/", &[BIN]),
         ("\"stty\"", &[BIN]),
-        ("cfg(unix)", &[PERMS, MEDIUM, BIN]),
-        ("cfg(windows)", &[PERMS, MEDIUM, ERROR, BIN]),
+        ("cfg(unix)", &[PERMS, MEDIUM, KEYSTORE, BIN]),
+        ("cfg(windows)", &[PERMS, MEDIUM, ERROR, KEYSTORE, BIN]),
         ("cfg(not(any(unix, windows)))", &[KEYSTORE, LIB]),
     ];
 
@@ -3521,6 +3523,7 @@ fn spend_state_is_atomic_under_syscall_kill_not_power_loss() {
 /// decision to split this session out more right rather than less: the split
 /// was correct for the observation-path reason regardless of whether the
 /// observable survived.
+#[cfg(unix)]
 #[test]
 fn spend_state_is_never_observed_half_advanced() {
     use keystore_harness::{
@@ -3797,6 +3800,250 @@ fn spend_state_is_never_observed_half_advanced() {
     );
 }
 
+/// I3's proof on Windows, where the store is two slot files rewritten in
+/// place and a commit is two steps: stop the reservation's commit and the
+/// settle's after each step, and tear each one's write in every mix of old
+/// and new sectors, at the old length and at the new; reopen from disk every
+/// time, and find every member of the spend state fully pre or fully post,
+/// never mixed -- post once the write is whole, pre while it is torn.
+///
+/// # What this establishes, and what it cannot see
+///
+/// A stop is a kill at a syscall boundary, as on Unix, and on this layout a
+/// whole write is already the newer slot, so both stops are post. A tear is
+/// what a power cut can leave of a write not yet flushed, which a kill
+/// cannot: sector by sector, a mix of the slot as it stood and the frame
+/// being written. **Not driven:** a flushed write lost -- the premise the
+/// layout rests on, which Microsoft's documentation and the device carry and
+/// no test can -- and a sector torn inside itself, which the keyless check
+/// refuses as it refuses any other mix, and which `keystore::slots`' own
+/// tests reach with every one-bit change and every cut of a frame, on every
+/// board.
+///
+/// The recorder's arguments are held as on Unix: each uninterrupted commit
+/// is one write and one flush, of the same slot, at the frame's length.
+#[cfg(windows)]
+#[test]
+fn spend_state_is_never_observed_half_advanced() {
+    use keystore_harness::{derived_account, imported_account, ScratchDir, DERIVED_TAG, DIGEST, FIGURES, IMPORTED_TAG};
+    use mochimo_crypto::account::WotsIndex;
+    use mochimo_crypto::keystore::{Call, Disk, Instrumented, Keystore, Pending};
+
+    type Store = Keystore<Instrumented<Disk>>;
+    const STEPS: [&str; 2] = ["write_slot", "flush_slot"];
+    const SECTOR: usize = 512;
+    /// The retained block's digest, as in the Unix proof.
+    const SETTLED_DIGEST: [u8; 32] = [0xD0; 32];
+    let one = WotsIndex::ZERO.advanced().unwrap_or_else(|e| panic!("{e}"));
+    let retained = Pending {
+        spent_index: WotsIndex::ZERO,
+        digest: SETTLED_DIGEST,
+        figures: Some(FIGURES),
+    };
+    let open_block = Pending {
+        spent_index: one,
+        digest: DIGEST,
+        figures: Some(FIGURES),
+    };
+
+    // The Unix proof's two seeds: one reservation settled and retained, and
+    // the same store one commit further, the next reservation open.
+    fn seed(dir: &ScratchDir) -> Store {
+        let mut ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init())
+            .unwrap_or_else(|e| panic!("create: {e}"));
+        ks.add(imported_account()).unwrap_or_else(|e| panic!("add imported: {e}"));
+        let mut d = derived_account();
+        for _ in 0..5 {
+            d.advance().unwrap_or_else(|e| panic!("advance: {e}"));
+        }
+        ks.add(d).unwrap_or_else(|e| panic!("add derived: {e}"));
+        let _ = ks
+            .persist_advance(&IMPORTED_TAG, &SETTLED_DIGEST, FIGURES)
+            .unwrap_or_else(|e| panic!("seed reserve: {e}"));
+        ks.persist_settled(&IMPORTED_TAG).unwrap_or_else(|e| panic!("seed settle: {e}"));
+        ks.medium_mut().reset_calls();
+        ks
+    }
+    fn seed_open(dir: &ScratchDir) -> Store {
+        let mut ks = seed(dir);
+        let _ = ks
+            .persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES)
+            .unwrap_or_else(|e| panic!("seed open: {e}"));
+        ks.medium_mut().reset_calls();
+        ks
+    }
+    fn reserve(ks: &mut Store) -> mochimo_crypto::Result<()> {
+        ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).map(|_| ())
+    }
+    fn settle(ks: &mut Store) -> mochimo_crypto::Result<()> {
+        ks.persist_settled(&IMPORTED_TAG)
+    }
+    /// `len` bytes, each sector from `new` where `mask` has its bit and from
+    /// `old` where it has not, and zero past the end of either.
+    fn mix(old: &[u8], new: &[u8], mask: u32, len: usize) -> Vec<u8> {
+        (0..len)
+            .map(|at| {
+                let source = if mask & (1 << (at / SECTOR)) != 0 { new } else { old };
+                source.get(at).copied().unwrap_or(0)
+            })
+            .collect()
+    }
+    fn reopen(label: &str, dir: &ScratchDir) -> Store {
+        keystore_harness::reopen_with(label, dir.path(), || Instrumented::new(Disk))
+            .result
+            .unwrap_or_else(|e| panic!("{label}: reopen: {e}"))
+    }
+
+    // What a fresh reader finds, checked to be wholly one side of the commit:
+    // `true` for post.
+    let reserved = |ks: &Store, pre_gen: u64, at: &str| -> bool {
+        let view = ks
+            .view(&IMPORTED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("{at}: imported account vanished"));
+        let gen = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+        let index_is_pre = view.wots_index == one;
+        let pending_is_pre = view.pending.is_none();
+        let settled_is_pre = view.settled.is_some();
+        let gen_is_pre = gen == pre_gen;
+        assert!(
+            index_is_pre == pending_is_pre && pending_is_pre == settled_is_pre && settled_is_pre == gen_is_pre,
+            "{at}: spend state observed HALF-advanced -- index pre={index_is_pre}, pending \
+             pre={pending_is_pre}, settled pre={settled_is_pre}, generation pre={gen_is_pre}"
+        );
+        if index_is_pre {
+            assert_eq!(view.settled, Some(retained), "{at}: the pre-spend state lost its retained block");
+        } else {
+            assert_eq!(view.pending, Some(open_block), "{at}: the reservation is not the one sealed");
+            assert_eq!(view.wots_index.get(), 2, "{at}: the index is not one past the reservation");
+            assert_eq!(view.settled, None, "{at}: the retained block survived the reservation that releases it");
+        }
+        let derived = ks
+            .view(&DERIVED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("{at}: derived account vanished"));
+        assert_eq!(derived.wots_index.get(), 5, "{at}: the sibling account moved");
+        !index_is_pre
+    };
+    let settled = |ks: &Store, pre_gen: u64, at: &str| -> bool {
+        let view = ks
+            .view(&IMPORTED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("{at}: imported account vanished"));
+        let gen = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+        let open_is_pre = view.pending.is_some();
+        let retained_is_post = view.settled.is_some();
+        let gen_is_pre = gen == pre_gen;
+        assert!(
+            open_is_pre != retained_is_post && open_is_pre == gen_is_pre,
+            "{at}: settle observed HALF-done -- open={open_is_pre}, retained={retained_is_post}, \
+             generation pre={gen_is_pre}"
+        );
+        if open_is_pre {
+            assert_eq!(view.pending, Some(open_block), "{at}: the open reservation is not the one sealed");
+        } else {
+            assert_eq!(view.settled, Some(open_block), "{at}: the settled block is not the reservation");
+        }
+        assert_eq!(view.wots_index.get(), 2, "{at}: settle moved the index");
+        !open_is_pre
+    };
+
+    let mut stops = 0usize;
+    let mut tears = 0usize;
+    type Seed = fn(&ScratchDir) -> Store;
+    type Commit = fn(&mut Store) -> mochimo_crypto::Result<()>;
+    type Observe<'a> = &'a dyn Fn(&Store, u64, &str) -> bool;
+    let walks: [(&str, Seed, Commit, Observe<'_>); 2] =
+        [("reservation", seed, reserve, &reserved), ("settle", seed_open, settle, &settled)];
+    for (label, seeded, commit, observe) in walks {
+        // Control: the uninterrupted commit, the slot it writes, and that
+        // slot's bytes before and after.
+        let control = ScratchDir::new("i3-slot-control");
+        let mut ks = seeded(&control);
+        let pre_gen = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+        let before = |name: &str| std::fs::read(control.path().join(name)).unwrap_or_else(|e| panic!("{e}"));
+        let (old0, old1) = (before("accounts.mks"), before("accounts.mks.1"));
+        commit(&mut ks).unwrap_or_else(|e| panic!("{label}: control commit: {e}"));
+        let calls = ks.medium().calls().to_vec();
+        let [Call::WriteSlot { path, len }, Call::FlushSlot { path: flushed }] = calls.as_slice() else {
+            panic!("{label}: the uninterrupted commit is not one write and one flush: {calls:?}")
+        };
+        assert_eq!(path, flushed, "{label}: the commit flushed a slot other than the one it wrote");
+        let name = path.file_name().unwrap_or_else(|| panic!("{label}: a slot path with no name")).to_os_string();
+        let new = std::fs::read(path).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(*len, new.len(), "{label}: the write's recorded length is not the frame's");
+        let old = if name == "accounts.mks" { old0 } else { old1 };
+        assert_ne!(old, new, "{label}: the control commit changed nothing in the slot it wrote");
+        assert!(observe(&ks, pre_gen, &format!("{label} control")), "{label}: the control commit is not post");
+        drop(ks);
+
+        for k in 1..=STEPS.len() {
+            let dir = ScratchDir::new("i3-slot-stop");
+            let mut ks = seeded(&dir);
+            ks.medium_mut().stop_after(Some(k));
+            let err = commit(&mut ks).err().unwrap_or_else(|| panic!("{label} stop {k}: the commit returned Ok"));
+            assert_eq!(
+                err,
+                mochimo_crypto::Error::Io {
+                    op: STEPS[k - 1],
+                    kind: std::io::ErrorKind::Interrupted
+                },
+                "{label} stop {k}: not the injected error"
+            );
+            assert_eq!(ks.medium().calls().len(), k, "{label} stop {k}: the error path made a further medium call");
+            assert!(
+                matches!(commit(&mut ks), Err(mochimo_crypto::Error::Poisoned { .. })),
+                "{label} stop {k}: the handle is not poisoned"
+            );
+            drop(ks);
+            let ks = reopen("I3 slot stop", &dir);
+            assert!(observe(&ks, pre_gen, &format!("{label} stop {k}")), "{label} stop {k}: a whole write was not taken");
+            stops += 1;
+        }
+
+        let sectors = old.len().max(new.len()).div_ceil(SECTOR);
+        for mask in 0u32..(1 << sectors) {
+            for len in [old.len(), new.len()] {
+                let at = format!("{label} sectors {mask:#b} at the {} length", if len == new.len() { "new" } else { "old" });
+                let dir = ScratchDir::new("i3-slot-tear");
+                let mut ks = seeded(&dir);
+                assert_eq!(std::fs::read(dir.path().join(&name)).unwrap_or_else(|e| panic!("{e}")), old, "{at}: seeding is not deterministic");
+                ks.medium_mut().tear_after(
+                    Some(1),
+                    Box::new(move |stood: Option<&[u8]>, frame: &[u8]| -> Option<Vec<u8>> {
+                        Some(mix(stood.unwrap_or(&[]), frame, mask, len))
+                    }),
+                );
+                let err = commit(&mut ks).err().unwrap_or_else(|| panic!("{at}: the commit returned Ok"));
+                assert_eq!(
+                    err,
+                    mochimo_crypto::Error::Io {
+                        op: "write_slot",
+                        kind: std::io::ErrorKind::Interrupted
+                    },
+                    "{at}: not the injected error"
+                );
+                drop(ks);
+                let whole = mix(&old, &new, mask, len) == new;
+                let ks = reopen("I3 slot tear", &dir);
+                assert_eq!(observe(&ks, pre_gen, &at), whole, "{at}: taken as the wrong side of the commit");
+                tears += 1;
+            }
+        }
+    }
+    assert_eq!(stops, 4, "the walks drove {stops} stops, not two over each of two commits");
+    assert!(tears >= 8, "the walks drove {tears} torn writes, too few to mix");
+
+    // Every integer on this line is a small count; the largest is what the
+    // census reads against its floor of 4.
+    let driven = stops + tears;
+    println!(
+        "  I3 atomicity: {driven} interruption point(s) driven -- {stops} stop(s) after the slot \
+         layout's two steps over the reservation and the settle, {tears} write(s) torn by sector \
+         -- 4 member(s) observed across each, 2 account(s) reopened at every point"
+    );
+}
+
 /// I2's proof: the receipt — the gate `Keystore::sign_spend` consumes — is
 /// never released for an index that is not durable.
 ///
@@ -3818,6 +4065,7 @@ fn spend_state_is_never_observed_half_advanced() {
 /// standing in for a broadcast takes `&AdvanceReceipt`, and nothing outside
 /// the crate can mint one (`ui/fail/account_advance_receipt_is_not_constructible.rs`).
 /// Same crash model and residue as the I3 proof above.
+#[cfg(unix)]
 #[test]
 fn signature_is_not_released_before_the_index_is_durable() {
     use keystore_harness::{derived_account, imported_account, ScratchDir, DIGEST, FIGURES, IMPORTED_TAG};
@@ -3901,6 +4149,117 @@ fn signature_is_not_released_before_the_index_is_durable() {
     let _ = broadcast(&r);
     drop(ks);
     let ks = keystore_harness::reopen("I2 control", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let v = ks.view(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("vanished"));
+    assert_eq!(v.wots_index, r.index());
+
+    println!(
+        "  I2 durability: {driven} crash point(s) driven between the first write and the \
+         receipt return, {receipts_escaped} receipt(s) escaped, 1 receipt from the \
+         uninterrupted run naming the index a fresh reopen reads"
+    );
+}
+
+/// I2's proof on Windows: the receipt is never released for an index that
+/// is not durable, with the commit stopped after each of the slot layout's
+/// two steps and its write torn -- sector by sector, a mix of the slot as it
+/// stood and the frame being written, which is what a power cut can leave of
+/// a write not yet flushed.
+///
+/// A stop leaves the write whole, and on this layout a whole write is
+/// already the newer slot: the index is advanced and the previous one is not
+/// reachable again, and no receipt named it. A torn write leaves the store
+/// where it was, and the account can still move forward from there. Same
+/// residue as I3's proof above: a flushed write lost is not driven.
+#[cfg(windows)]
+#[test]
+fn signature_is_not_released_before_the_index_is_durable() {
+    use keystore_harness::{derived_account, imported_account, ScratchDir, DIGEST, FIGURES, IMPORTED_TAG};
+    use mochimo_crypto::account::{AdvanceReceipt, WotsIndex};
+    use mochimo_crypto::keystore::{Disk, Instrumented, Keystore};
+
+    fn broadcast(_r: &AdvanceReceipt) -> &'static str {
+        "broadcast requires the receipt; it cannot precede persistence"
+    }
+
+    fn seed(dir: &ScratchDir) -> Keystore<Instrumented<Disk>> {
+        let mut ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init())
+            .unwrap_or_else(|e| panic!("create: {e}"));
+        ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+        ks.add(derived_account()).unwrap_or_else(|e| panic!("{e}"));
+        ks.medium_mut().reset_calls();
+        ks
+    }
+
+    let mut receipts_escaped = 0usize;
+    let mut driven = 0usize;
+    // Two stops, then two tears: the first sector new and the rest as it
+    // stood, and the other way round.
+    for point in 0..4usize {
+        let dir = ScratchDir::new("i2-slot-crash");
+        let mut ks = seed(&dir);
+        let whole = point < 2;
+        if whole {
+            ks.medium_mut().stop_after(Some(point + 1));
+        } else {
+            let first_new = point == 2;
+            ks.medium_mut().tear_after(
+                Some(1),
+                Box::new(move |stood: Option<&[u8]>, frame: &[u8]| -> Option<Vec<u8>> {
+                    let stood = stood.unwrap_or(&[]);
+                    Some(
+                        (0..frame.len())
+                            .map(|at| {
+                                let source = if (at < 512) == first_new { frame } else { stood };
+                                source.get(at).copied().unwrap_or(0)
+                            })
+                            .collect(),
+                    )
+                }),
+            );
+        }
+        if ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).is_ok() {
+            receipts_escaped += 1;
+        }
+        drop(ks);
+        let mut ks = keystore_harness::reopen_with("I2 slot crash point", dir.path(), || Instrumented::new(Disk))
+            .result
+            .unwrap_or_else(|e| panic!("crash point {point}: reopen: {e}"));
+        let view = ks
+            .view(&IMPORTED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("crash point {point}: account vanished"));
+        if whole {
+            assert_eq!(view.wots_index.get(), 1, "crash point {point}: a whole write was not taken");
+            ks.persist_settled(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}"));
+            let back = ks.persist_advance_to(&IMPORTED_TAG, WotsIndex::ZERO).err();
+            assert!(
+                matches!(back, Some(mochimo_crypto::Error::Range { what: "wots index for tag", min: 2, got: 0, .. })),
+                "crash point {point}: the previous index was reachable again: {back:?}"
+            );
+        } else {
+            assert_eq!(view.wots_index.get(), 0, "crash point {point}: a torn write advanced the index");
+            let next = WotsIndex::ZERO.advanced().unwrap_or_else(|e| panic!("{e}"));
+            let r = ks
+                .persist_advance_to(&IMPORTED_TAG, next)
+                .unwrap_or_else(|e| panic!("crash point {point}: liveness after a torn write: {e}"));
+            assert_eq!(r.index(), next);
+            let _ = broadcast(&r);
+        }
+        driven += 1;
+    }
+    assert_eq!(driven, 4);
+    assert_eq!(receipts_escaped, 0, "a receipt escaped an interrupted persist");
+
+    // Control: the uninterrupted run releases exactly one receipt, and it
+    // names what a fresh reopen reads.
+    let dir = ScratchDir::new("i2-slot-control");
+    let mut ks = seed(&dir);
+    let r = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).unwrap_or_else(|e| panic!("{e}"));
+    let _ = broadcast(&r);
+    drop(ks);
+    let ks = keystore_harness::reopen("I2 slot control", dir.path())
         .result
         .unwrap_or_else(|e| panic!("{e}"));
     let v = ks.view(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("vanished"));
@@ -6426,6 +6785,11 @@ const DECLARED_UNRESOLVED_SRC_NAMES: &[(&str, &str)] = &[
         "mdst_val_rc_name",
         "a fixture field: group D's `mdst_val_rc_name`, quoted in `error.rs` as the reference's \
          own naming of a return code, against which ours is compared. Fixture key, as above.",
+    ),
+    (
+        "medium_slot_steps_are_not_reorderable",
+        "a trybuild compile-fail case, as above: Windows' order pin, registered there in the \
+         rename layout's place.",
     ),
     (
         "medium_steps_are_not_reorderable",
@@ -9506,11 +9870,12 @@ const DECLARED_PANIC_SITES: &[(&str, &str, usize, &str)] = &[
     (
         "crates/mochimo-crypto/src/keystore/slots.rs",
         "assert!",
-        11,
+        12,
         "same #[cfg(test)] module: the image back out of its frame, the vacant \
          and absent sorts, every cut and every one-bit change of a frame sorting \
-         as torn, the sector-mix walk's floor and its two verdicts, the refused \
-         later frame version, and the key `take` hands back.",
+         as torn, and one longer than any this build writes, the sector-mix \
+         walk's floor and its two verdicts, the refused later frame version, and \
+         the key `take` hands back.",
     ),
     (
         "crates/mochimo-crypto/src/keystore/slots.rs",

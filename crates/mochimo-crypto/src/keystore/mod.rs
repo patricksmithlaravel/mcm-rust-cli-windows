@@ -6,8 +6,11 @@
 //! One directory, one snapshot file holding every account, rewritten
 //! atomically on every commit through four crate-owned steps — write a temp,
 //! fsync it, rename it over the target, fsync the directory — and a receipt
-//! minted only after the fourth. The format is `format`; the steps are
-//! `medium`; the argument for the whole-snapshot shape is I3's
+//! minted only after the fourth. On Windows the snapshot is two slot files
+//! written in place and the steps are that layout's: `slots` has the frame
+//! and the rule by which `open` takes the newer image. The format is
+//! `format`; the steps are `medium`; the argument for the whole-snapshot
+//! shape is I3's
 //! (`docs/specification.md`, *I3*): per-account files cannot put every
 //! member in one write once a store-level member exists, and an append-only
 //! log moves the same three fsyncs plus a torn-tail parser and a replay path
@@ -86,8 +89,9 @@
 //! a new inode, the second locks the old one -- two holders). On the other
 //! side, refusing a directory that holds a lock file with no snapshot beside
 //! it is the stale-lock semantics `flock` was chosen to avoid, reintroduced
-//! through `create`'s pre-check; [`occupied`] reports the snapshot alone
-//! and a live holder is refused by `take_lock`'s `Locked`, which is the only
+//! through `create`'s pre-check; [`occupied`] reports the snapshot alone --
+//! on Windows slot 1 as well, for the reason its doc gives -- and a live
+//! holder is refused by `take_lock`'s `Locked`, which is the only
 //! thing that can tell a holder from a leftover. Two residues, stated: a
 //! `create` killed after `write_temp` and before `rename` leaves a complete
 //! image in `accounts.mks.tmp` that the next commit -- `create`'s first, or
@@ -108,7 +112,12 @@
 //! when it parses: one authority, one parse path. A partial temp under v3 is
 //! a plaintext header over a truncated ciphertext, which the tag refuses
 //! anyway, so what forbids adopting it is not the leak but that two files
-//! must never both be authorities.
+//! must never both be authorities. On Windows `open` does read two files, the
+//! slots, and takes one of them by `slots`' rule, which is the one authority
+//! there: the older slot is the state before the newer, never a second
+//! history, and it is never taken while the newer reads. A stale temp on
+//! Windows is one a build of the rename layout left, and it is unlinked the
+//! same way.
 //!
 //! # The signing path
 //!
@@ -145,28 +154,30 @@
 //! never retry). Rename atomicity is relied on for ext4/APFS/XFS/btrfs and is
 //! not detectable from `std` on FAT/exFAT/FUSE. Said here and at each proof.
 //!
-//! **On Windows the fourth step flushes nothing, and the power-loss half of
-//! I3 is not claimed there.** Win32 documents no call that commits a directory
-//! entry on NTFS; `medium::Disk::fsync_dir`'s Windows arm weighs the two
-//! candidates and states the hazard left -- a reservation lost to a power cut
-//! before the filesystem flushes its log, and a second spend signed at the
-//! same position. Rename atomicity is relied on for NTFS as for the Unix
-//! filesystems above, and Win32 does not document it either. Kills at a
-//! syscall boundary are covered by the same proofs on both platforms, and
-//! those proofs pass on a Windows runner as on Unix; `FORK.md` records the
-//! run.
+//! **On Windows there is no rename, and the power-loss half of I3 rests on
+//! the flush.** Win32 documents no call that commits the directory entry a
+//! rename writes, so the store is two slot files and a commit writes the one
+//! not holding the newest image, in place, and flushes it with
+//! `FlushFileBuffers` before [`Durable`] is minted; `open` takes the newer of
+//! the two intact images. A power cut can then undo only a write not yet
+//! flushed, which no receipt attests, and it cannot bring back an older state
+//! than one a receipt did. That the flush, once returned, is on the device is
+//! Microsoft's documentation and the device's honesty, as `fsync`'s is on
+//! Unix; `medium`'s module doc cites the pages. No rename is relied on, so
+//! neither is its atomicity. Kills at a syscall boundary, and writes torn in
+//! any mix of sectors, are driven through the same instrument on a Windows
+//! runner, by proofs that keep the Unix proofs' names.
 
 // The storage guarantees, per platform, which the module's head states in
 // full: the four-step commit and the lock above rest on Unix's rename(2),
-// directory fsync and flock(2), and on Windows' replacing move and
-// LockFileEx with no directory flush at all (`medium::Disk::fsync_dir`'s
-// Windows arm says what that leaves). A target that is neither has had none
-// of that argued.
+// directory fsync and flock(2), and on Windows' two slot files flushed in
+// place with FlushFileBuffers, and LockFileEx. A target that is neither has
+// had none of that argued.
 #[cfg(not(any(unix, windows)))]
 compile_error!(
     "the keystore's storage guarantees are stated for Unix (rename atomicity, \
-     directory fsync, flock) and for Windows (the replacing move, LockFileEx, \
-     and no directory flush); this target is neither"
+     directory fsync, flock) and for Windows (two slot files flushed in place, \
+     LockFileEx); this target is neither"
 );
 
 pub(crate) mod crypt;
@@ -174,13 +185,15 @@ pub mod format;
 pub mod medium;
 pub(crate) mod perms;
 pub mod sign;
-#[cfg(test)]
+#[cfg(any(windows, test))]
 mod slots;
 pub mod spend;
 
 use std::collections::BTreeMap;
 use std::fs::{self, File, TryLockError};
 use std::io::Read;
+#[cfg(windows)]
+use std::io::{Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use zeroize::Zeroizing;
@@ -198,13 +211,16 @@ pub use sign::{KeyAccess, SpendSignature};
 pub use spend::SpendAddresses;
 
 use format::{RecordRef, Slot};
+#[cfg(windows)]
+use medium::SLOT1_NAME;
 use medium::{SNAPSHOT_NAME, TEMP_NAME};
 
 pub(crate) const LOCK_NAME: &str = "keystore.lock";
 
-/// Evidence that all four durable steps completed. On Windows the fourth is
-/// empty, so there it witnesses a replacing move every other process can see
-/// and not one a power cut cannot undo -- the module's head says why.
+/// Evidence that the commit's durable steps completed: on Unix all four, the
+/// directory fsync last; on Windows the slot layout's, the flush of the slot
+/// just written last. On both it witnesses a state a power cut cannot take
+/// back -- the module's head says what each platform's claim rests on.
 ///
 /// Constructed at exactly one
 /// site in this crate (the `Ok` arm of [`Keystore::commit`]); the source scan
@@ -282,6 +298,45 @@ pub struct Keystore<M: Medium = Disk> {
     /// is how a page learns it happened.
     opened_version: u16,
     on_disk_version: u16,
+    /// On Windows, the two slot files and what this handle knows of them.
+    #[cfg(windows)]
+    slots: Slots,
+}
+
+/// On Windows, the slot files a handle holds, and what it knows of them.
+#[cfg(windows)]
+struct Slots {
+    /// Slot 0 and slot 1, held for the handle's life and shared for reading
+    /// alone (`perms::open_slot`); `None` for a slot file not there yet.
+    held: [Option<File>; 2],
+    /// The slot holding the newest image, which no commit writes. `None` only
+    /// inside `create`, before its commit.
+    newest: Option<usize>,
+    /// Whether the newest slot is known to be on the device -- flushed by
+    /// this handle. False after `open`, so a handle's first commit flushes it
+    /// before writing the other: after a flush that failed, a later process
+    /// can read a newer slot out of the cache although it never reached the
+    /// disk, and overwriting the older slot then would leave a power cut
+    /// nothing to go back to.
+    on_device: bool,
+    /// Whether slot 0 has yet to become a frame: it holds a store in the
+    /// rename layout, or nothing yet. Until it is one, a build that reads
+    /// only that layout would read it as the snapshot.
+    vacate: bool,
+}
+
+#[cfg(windows)]
+impl Slots {
+    /// Nothing held and nothing to protect: `create`'s state before its
+    /// commit, which creates both files.
+    fn fresh() -> Slots {
+        Slots {
+            held: [None, None],
+            newest: None,
+            on_device: true,
+            vacate: true,
+        }
+    }
 }
 
 /// What a handle needs to read and write its own store.
@@ -375,11 +430,76 @@ fn take_lock(dir: &Path) -> Result<File> {
 /// `create` with advice every other command contradicts. The file's existence says
 /// nothing about a holder; the flock does, `take_lock` asks it, and a live
 /// holder is `Locked` there. See the module doc's "The lock".
+///
+/// **On Windows slot 1 is asked too.** `create` writes it before
+/// `accounts.mks`, so a directory holding it without the snapshot is what a
+/// `create` cut short leaves -- or the last copy of a store whose snapshot
+/// was deleted by hand, which is why it is refused here rather than written
+/// over.
 pub fn occupied(dir: &Path) -> Option<&'static str> {
     if dir.join(SNAPSHOT_NAME).exists() {
         return Some("snapshot");
     }
+    #[cfg(windows)]
+    if dir.join(SLOT1_NAME).exists() {
+        return Some("snapshot");
+    }
     None
+}
+
+/// A slot file's bytes, read through the handle held for it: every byte, or
+/// -- for a file longer than any frame this build writes, which nothing then
+/// allocates for -- the image-length refusal the Unix arm makes of an
+/// over-long snapshot, in its words.
+#[cfg(windows)]
+fn read_slot(file: &mut File) -> Result<Zeroizing<Vec<u8>>> {
+    let len = file.metadata().map_err(io("stat slot"))?.len();
+    let over = || Error::Range {
+        what: "keystore image length",
+        min: format::MIN_IMAGE_LEN as u64,
+        max: format::MAX_IMAGE_LEN as u64,
+        got: len,
+    };
+    let len = usize::try_from(len)
+        .ok()
+        .filter(|&len| len <= slots::MAX_FRAME_LEN)
+        .ok_or_else(over)?;
+    let mut bytes: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; len]);
+    file.seek(SeekFrom::Start(0)).map_err(io("read slot"))?;
+    file.read_exact(&mut bytes).map_err(io("read slot"))?;
+    Ok(bytes)
+}
+
+/// The image `open` would take from `dir`, read without the lock and without
+/// holding the slots: what a test compares a Windows store by, where a Unix
+/// one is compared by its snapshot's bytes, and nothing the wallet calls.
+///
+/// Windows only, and public only because `tests/` is another crate -- the
+/// reason `medium::Instrumented` is public. Ordering two slots needs the key,
+/// since the generation is in the ciphertext, so it takes the password.
+#[cfg(windows)]
+pub fn newest_image(dir: &Path, password: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
+    let read = |name: &str| -> Result<Option<Zeroizing<Vec<u8>>>> {
+        match fs::read(dir.join(name)) {
+            Ok(bytes) => Ok(Some(Zeroizing::new(bytes))),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(io("read slot")(e)),
+        }
+    };
+    let slot0 = slots::sort(read(SNAPSHOT_NAME)?)?;
+    let slot1 = slots::sort(read(SLOT1_NAME)?)?;
+    let newest = if slots::take(&slot0, &slot1, password)?.newest == 0 {
+        slot0
+    } else {
+        slot1
+    };
+    match newest {
+        slots::Content::Image(image) | slots::Content::Other(image) => Ok(image),
+        _ => Err(Error::Corrupt {
+            what: "neither slot holds an intact image",
+            offset: 0,
+        }),
+    }
 }
 
 impl Keystore<Disk> {
@@ -444,6 +564,8 @@ impl<M: Medium> Keystore<M> {
             },
             opened_version: format::VERSION,
             on_disk_version: format::VERSION,
+            #[cfg(windows)]
+            slots: Slots::fresh(),
         };
         let image = ks.seal(&[], 0)?;
         let _durable: Durable = ks.commit(&image)?;
@@ -451,6 +573,7 @@ impl<M: Medium> Keystore<M> {
     }
 
     /// [`Keystore::open`] over an explicit medium.
+    #[cfg(unix)]
     pub fn open_with(dir: &Path, medium: M, unlock: &Unlock<'_>) -> Result<Self> {
         perms::refuse_unsafe_dir(dir)?;
         // The snapshot's existence is checked before the lock file is touched,
@@ -533,6 +656,70 @@ impl<M: Medium> Keystore<M> {
             },
             opened_version: version,
             on_disk_version: version,
+        })
+    }
+
+    /// [`Keystore::open`] over an explicit medium, on Windows: the same
+    /// refusals in the same order as the Unix arm's, then both slots read
+    /// through the handles this one holds for its life, and the newer image
+    /// taken by `slots`' rule.
+    ///
+    /// **Read through the held handles, with nothing re-checked after.** The
+    /// Unix arm refuses a snapshot that grows while it is read; here the
+    /// handles share read access alone, so nothing else can write a slot
+    /// while it is read, or after, while the handle lives.
+    #[cfg(windows)]
+    pub fn open_with(dir: &Path, medium: M, unlock: &Unlock<'_>) -> Result<Self> {
+        perms::refuse_unsafe_dir(dir)?;
+        // The snapshot's name before the lock file is touched, the read under
+        // the lock, a stale temp unlinked and never adopted: the Unix arm's
+        // order, for its reasons, which its comments give.
+        let path = dir.join(SNAPSHOT_NAME);
+        if !path.exists() {
+            return Err(Error::Missing);
+        }
+        let lock = take_lock(dir)?;
+        let temp = dir.join(TEMP_NAME);
+        if temp.exists() {
+            fs::remove_file(&temp).map_err(io("remove stale temp"))?;
+        }
+        let mut held0 = perms::open_slot(&path)?.ok_or(Error::Missing)?;
+        let mut held1 = perms::open_slot(&dir.join(SLOT1_NAME))?;
+        let slot0 = slots::sort(Some(read_slot(&mut held0)?))?;
+        // Slot 1 longer than any frame is torn rather than a refusal: it is
+        // never read while slot 0 holds the store, and never allocated for.
+        let slot1 = match held1.as_mut() {
+            None => slots::Content::Absent,
+            Some(file) => match read_slot(file) {
+                Err(Error::Range { .. }) => slots::Content::Torn,
+                read => slots::sort(Some(read?))?,
+            },
+        };
+        let taken = slots::take(&slot0, &slot1, unlock.password)?;
+        let vacate = matches!(slot0, slots::Content::Other(_));
+        Ok(Keystore {
+            dir: dir.to_path_buf(),
+            _lock: lock,
+            medium,
+            state: State::Live {
+                generation: taken.parsed.generation,
+                slots: taken.parsed.slots,
+            },
+            master: taken.parsed.master,
+            crypto: StoreCrypto {
+                key: taken.key,
+                kdf: taken.kdf,
+                salt: taken.salt,
+                nonce_seed: unlock.nonce_seed,
+            },
+            opened_version: taken.version,
+            on_disk_version: taken.version,
+            slots: Slots {
+                held: [Some(held0), held1],
+                newest: Some(taken.newest),
+                on_device: false,
+                vacate,
+            },
         })
     }
 
@@ -686,9 +873,13 @@ impl<M: Medium> Keystore<M> {
     /// [`Durable`]. On any error the handle is poisoned before the error is
     /// returned; no further filesystem operation is performed on the error
     /// path, so what a kill at that boundary would leave is what the
-    /// interrupted step left.
+    /// interrupted step left. On Windows the steps are the slot layout's,
+    /// in `Keystore::write_slots`, and they return into the same arm.
     fn commit(&mut self, image: &[u8]) -> Result<Durable> {
         let dir = self.dir.clone();
+        #[cfg(windows)]
+        let outcome = self.write_slots(&dir, image);
+        #[cfg(unix)]
         let outcome = (|| -> Result<()> {
             let written = self.medium.write_temp(&dir, image)?;
             let synced = self.medium.fsync_file(written)?;
@@ -707,6 +898,44 @@ impl<M: Medium> Keystore<M> {
                 Err(e)
             }
         }
+    }
+
+    /// The Windows commit: `image` framed and written into the slot that does
+    /// not hold the newest one, and flushed.
+    ///
+    /// Three rules, each the crash argument's and not a convenience. The
+    /// newest slot is on the device before the other is written: a handle's
+    /// first commit flushes it as it found it (`Slots::on_device` says why).
+    /// The write is flushed before this returns, so before `Durable` exists.
+    /// And a plain image in slot 0 is overwritten only once slot 1 holds a
+    /// flushed frame, with the vacant frame, which is what makes a build that
+    /// reads only the rename layout refuse the store from then on.
+    ///
+    /// A store with nothing in either slot yet is `create`'s: its image goes
+    /// to slot 1 and slot 0 is made vacant after it, so `accounts.mks`
+    /// existing means an image is on the device.
+    #[cfg(windows)]
+    fn write_slots(&mut self, dir: &Path, image: &[u8]) -> Result<()> {
+        if let (Some(newest), false) = (self.slots.newest, self.slots.on_device) {
+            let standing = self.slots.held[newest].as_ref().ok_or(Error::Io {
+                op: "flush_standing",
+                kind: std::io::ErrorKind::NotFound,
+            })?;
+            self.medium.flush_standing(dir, newest, standing)?;
+            self.slots.on_device = true;
+        }
+        let target = if self.slots.newest == Some(1) { 0 } else { 1 };
+        let framed = slots::frame(image)?;
+        let written = self.medium.write_slot(dir, target, &mut self.slots.held[target], &framed)?;
+        let _flushed = self.medium.flush_slot(written)?;
+        if target == 1 && self.slots.vacate {
+            let vacant = slots::frame(&[])?;
+            let written = self.medium.write_slot(dir, 0, &mut self.slots.held[0], &vacant)?;
+            let _flushed = self.medium.flush_slot(written)?;
+        }
+        self.slots.vacate = false;
+        self.slots.newest = Some(target);
+        Ok(())
     }
 
     /// Build the record list for an image: the current slots, optionally with

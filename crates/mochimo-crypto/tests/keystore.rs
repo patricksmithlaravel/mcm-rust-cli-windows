@@ -35,7 +35,7 @@ fn read_snapshot(dir: &ScratchDir) -> Vec<u8> {
 }
 
 fn write_snapshot(dir: &ScratchDir, bytes: &[u8]) {
-    std::fs::write(dir.path().join("accounts.mks"), bytes).unwrap_or_else(|e| panic!("{e}"));
+    dir.write_snapshot(bytes);
 }
 
 /// Position `i`, reached the only way a test can reach one: by advancing
@@ -294,7 +294,7 @@ fn a_store_sealed_by_an_earlier_build_opens_and_is_reproduced_byte_for_byte() {
         let _durable = ks.adopt_master(&m).unwrap_or_else(|e| panic!("{e}"));
         ks.add(Account::derive(&m, 0)).unwrap_or_else(|e| panic!("{e}"));
     }
-    let fresh = read_snapshot(&dir2);
+    let fresh = dir2.snapshot_bytes_under(PASSWORD);
     let first_difference = fresh.iter().zip(V4_IMAGE.iter()).position(|(a, b)| a != b);
     assert!(
         fresh.len() == V4_IMAGE.len() && first_difference.is_none(),
@@ -833,6 +833,7 @@ fn records_are_addressed_by_tag_not_position() {
     }
 }
 
+#[cfg(unix)]
 #[test]
 fn medium_sequence_is_exactly_the_four_steps_with_their_arguments() {
     let dir = ScratchDir::new("sequence");
@@ -851,6 +852,59 @@ fn medium_sequence_is_exactly_the_four_steps_with_their_arguments() {
             Call::Rename { from: tmp, to: snap },
             Call::FsyncDir { dir: dir.path().to_path_buf() },
         ]
+    );
+}
+
+/// The Windows form of the test above: each commit is the slot layout's
+/// steps, on the slot that does not hold the newest image, with the frame's
+/// length -- forty-six bytes over the image's.
+///
+/// `create` writes slot 1 and then slot 0's vacant frame; a handle's later
+/// commits alternate; and a handle opened on a store flushes the newest slot
+/// as it found it before its first write, which a handle that wrote the
+/// store itself has no need to.
+#[cfg(windows)]
+#[test]
+fn medium_sequence_is_exactly_the_slot_steps_with_their_arguments() {
+    const OVERHEAD: usize = 46;
+    let dir = ScratchDir::new("sequence");
+    let slot0 = dir.path().join("accounts.mks");
+    let slot1 = dir.path().join("accounts.mks.1");
+    let mut ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init()).unwrap_or_else(|e| panic!("{e}"));
+    let len = OVERHEAD + read_snapshot(&dir).len();
+    assert_eq!(
+        ks.medium().calls(),
+        &[
+            Call::WriteSlot { path: slot1.clone(), len },
+            Call::FlushSlot { path: slot1.clone() },
+            Call::WriteSlot { path: slot0.clone(), len: OVERHEAD },
+            Call::FlushSlot { path: slot0.clone() },
+        ],
+        "create is slot 1's image and then slot 0's vacant frame, each flushed"
+    );
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    ks.medium_mut().reset_calls();
+    let _receipt = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).unwrap_or_else(|e| panic!("{e}"));
+    let len = OVERHEAD + read_snapshot(&dir).len();
+    assert_eq!(
+        ks.medium().calls(),
+        &[Call::WriteSlot { path: slot1.clone(), len }, Call::FlushSlot { path: slot1.clone() }],
+        "the third commit is not slot 1's, written and flushed"
+    );
+    drop(ks);
+    let mut ks = keystore_harness::reopen_with("sequence", dir.path(), || Instrumented::new(Disk))
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    ks.persist_settled(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}"));
+    let len = OVERHEAD + read_snapshot(&dir).len();
+    assert_eq!(
+        ks.medium().calls(),
+        &[
+            Call::FlushStanding { path: slot1 },
+            Call::WriteSlot { path: slot0.clone(), len },
+            Call::FlushSlot { path: slot0 },
+        ],
+        "a reopened handle's first commit does not flush the newest slot before writing the other"
     );
 }
 
@@ -1155,51 +1209,52 @@ fn a_store_created_under_a_writable_parent_inherits_nothing_from_it() {
     assert!(Keystore::open(&store, &keystore_harness::unlock()).is_ok(), "the store does not reopen");
 }
 
-/// A snapshot another process holds open without delete sharing refuses the
-/// commit **by name**, changes nothing on disk, and poisons the handle; the
-/// store reopens at the index it had.
+/// A slot file another process holds open without sharing write refuses
+/// the store's `open` **by name**, before anything is read, and changes
+/// nothing; the store opens once the holder lets go. And while a handle holds
+/// its slots, a program that shares read alone cannot open them at all.
 ///
 /// The holder shares read only, which is the shape of a scanner or an
-/// indexer that did not ask for delete sharing. Green on a Windows runner, as
-/// above, which answers the question this test asks: `std` retries a refused
-/// replacing move once with POSIX rename semantics, and on that build the
-/// retry does not replace a held file. On a Windows where it did, this would
-/// be red, the commit would succeed, and `ReplaceRefused` would be reachable
-/// there only through a holder of the temp.
+/// indexer that asked for no more. On Windows `open` holds both slot files
+/// for writing, sharing read alone, so such a holder is met there, as
+/// `HeldOpen`, and never by a commit.
 #[cfg(windows)]
 #[test]
-fn a_snapshot_held_open_without_delete_sharing_refuses_the_commit_by_name() {
+fn a_slot_held_open_without_write_sharing_refuses_the_open_by_name() {
     use std::os::windows::fs::OpenOptionsExt;
     use windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ;
-    let dir = ScratchDir::new("held-snapshot");
+    let dir = ScratchDir::new("held-slot");
     let mut ks = keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}"));
     ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
-    let before = read_snapshot(&dir);
-    let holder = std::fs::OpenOptions::new()
-        .read(true)
-        .share_mode(FILE_SHARE_READ)
-        .open(dir.path().join("accounts.mks"))
-        .unwrap_or_else(|e| panic!("cannot hold the snapshot open: {e}"));
-    let refused = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err();
-    drop(holder);
-    assert!(
-        matches!(refused, Some(Error::ReplaceRefused { .. })),
-        "a commit over a held snapshot was not refused as ReplaceRefused: {refused:?}"
-    );
-    assert_eq!(read_snapshot(&dir), before, "the refused move changed the snapshot");
-    assert!(
-        matches!(ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err(), Some(Error::Poisoned { .. })),
-        "the handle was not poisoned by the refused commit"
-    );
     drop(ks);
-    let reopened = keystore_harness::open(dir.path()).unwrap_or_else(|e| panic!("{e}"));
-    assert_eq!(
-        reopened.view(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("missing")).wots_index,
-        WotsIndex::ZERO,
-        "the store reopened at a different index after a refused commit"
-    );
+    let before = dir.slot_bytes();
+    let hold = |name: &str| {
+        std::fs::OpenOptions::new()
+            .read(true)
+            .share_mode(FILE_SHARE_READ)
+            .open(dir.path().join(name))
+    };
+    for name in ["accounts.mks", "accounts.mks.1"] {
+        let holder = hold(name).unwrap_or_else(|e| panic!("cannot hold {name} open: {e}"));
+        let refused = keystore_harness::open(dir.path()).err();
+        drop(holder);
+        assert!(
+            matches!(refused, Some(Error::HeldOpen { .. })),
+            "an open with {name} held was not refused as HeldOpen: {refused:?}"
+        );
+        assert_eq!(dir.slot_bytes(), before, "the open refused over {name} changed a slot");
+    }
+    let ks = keystore_harness::open(dir.path()).unwrap_or_else(|e| panic!("the store does not open once the holder is gone: {e}"));
+    for name in ["accounts.mks", "accounts.mks.1"] {
+        assert!(
+            hold(name).is_err(),
+            "a program sharing read alone opened {name} while a handle holds it for writing"
+        );
+    }
+    drop(ks);
 }
 
+#[cfg(unix)]
 #[test]
 fn poisoned_handle_refuses_to_launder_a_rollback() {
     // The rollback this refuses: advance_to(k+5) fails at the
@@ -1216,6 +1271,36 @@ fn poisoned_handle_refuses_to_launder_a_rollback() {
     ks.medium_mut().stop_after(Some(4));
     let err = ks.persist_advance_to(&IMPORTED_TAG, target).err().unwrap_or_else(|| panic!("expected the injected error"));
     assert_eq!(err, Error::Io { op: "fsync_dir", kind: std::io::ErrorKind::Interrupted });
+    ks.medium_mut().stop_after(None);
+    let later = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err().unwrap_or_else(|| panic!("a poisoned handle wrote"));
+    assert!(matches!(later, Error::Poisoned { .. }), "{later:?}");
+    let msg = later.to_string();
+    assert!(msg.contains("drop this handle and reopen"), "{msg}");
+    assert!(msg.contains("do not retry"), "{msg}");
+    drop(ks);
+    let ks = Keystore::open(dir.path(), &keystore_harness::unlock()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        ks.view(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("missing")).wots_index,
+        target,
+        "disk's committed k+5 was overwritten"
+    );
+}
+
+/// The Windows form of the test above, with the interruption after the
+/// commit's last step there, the flush of the slot just written.
+#[cfg(windows)]
+#[test]
+fn poisoned_handle_refuses_to_launder_a_rollback() {
+    let dir = ScratchDir::new("poison");
+    let mut ks = Keystore::create_with(dir.path(), Instrumented::new(Disk), &keystore_harness::init()).unwrap_or_else(|e| panic!("{e}"));
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    let mut target = WotsIndex::ZERO;
+    for _ in 0..5 {
+        target = target.advanced().unwrap_or_else(|e| panic!("{e}"));
+    }
+    ks.medium_mut().stop_after(Some(2));
+    let err = ks.persist_advance_to(&IMPORTED_TAG, target).err().unwrap_or_else(|| panic!("expected the injected error"));
+    assert_eq!(err, Error::Io { op: "flush_slot", kind: std::io::ErrorKind::Interrupted });
     ks.medium_mut().stop_after(None);
     let later = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err().unwrap_or_else(|| panic!("a poisoned handle wrote"));
     assert!(matches!(later, Error::Poisoned { .. }), "{later:?}");
@@ -1374,6 +1459,12 @@ fn snapshot_bytes_never_contain_the_imported_root() {
         bytes.windows(ROOT.len()).all(|w| w != ROOT),
         "the imported root's 32 bytes appear somewhere in the snapshot. The whole point of \
          version 3 is that they do not."
+    );
+    // A Windows store is two slot files, and the older image is at rest too.
+    #[cfg(windows)]
+    assert!(
+        dir.slot_bytes().windows(ROOT.len()).all(|w| w != ROOT),
+        "the imported root's 32 bytes appear somewhere in the slot files"
     );
 
     // 2. AND PRESENT AFTER RESTORE. Without this, arm 1 is satisfied by a
@@ -1540,7 +1631,25 @@ fn a_lock_file_with_no_snapshot_is_inert_and_only_a_live_holder_refuses_create()
     });
 
     // 5.
+    #[cfg(unix)]
     std::fs::remove_file(dir.path().join("accounts.mks")).unwrap_or_else(|e| panic!("{e}"));
+    // On Windows a live handle holds its slot files without sharing delete,
+    // so no snapshot can be removed from under it: the live holder here is
+    // the lock alone, taken beside no store at all.
+    #[cfg(windows)]
+    let held = {
+        drop(held);
+        for name in ["accounts.mks", "accounts.mks.1"] {
+            std::fs::remove_file(dir.path().join(name)).unwrap_or_else(|e| panic!("{e}"));
+        }
+        let lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.path().join("keystore.lock"))
+            .unwrap_or_else(|e| panic!("{e}"));
+        lock.try_lock().unwrap_or_else(|e| panic!("{e}"));
+        lock
+    };
     assert_eq!(
         Keystore::create(dir.path(), &keystore_harness::init()).err(),
         Some(Error::Locked),

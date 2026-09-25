@@ -207,15 +207,30 @@ fn every_ui_case_compiles_or_fails_for_its_pinned_reason() {
         );
     }
 
+    // The medium's order pin is per platform, as its steps are: the rename
+    // layout's on Unix, the slot layout's on Windows. Each names methods the
+    // other platform's `Medium` does not have, so each is compiled only where
+    // it pins something, and both are counted above.
+    let registered: Vec<&std::path::PathBuf> = fails.iter().filter(|case| pinned_here(case)).collect();
+    assert_eq!(
+        fails.len() - registered.len(),
+        1,
+        "exactly one of the two medium order pins is another platform's; {} of {} fail cases \
+         are registered here",
+        registered.len(),
+        fails.len()
+    );
+
     // Evidence for `invariants.rs::census`, which requires this test to run,
     // pass, AND report what it measured -- an empty `#[test]` body runs and
     // passes, so execution alone does not distinguish one. Printed before the
     // `TestCases` is built because trybuild runs on drop; if the cases then
     // fail, the test fails and the census reads the failure, not this line.
     println!(
-        "\x20 compile-fail partition: {} fail case(s) ({secret_cases} secret, \
+        "\x20 compile-fail partition: {} fail case(s) registered here of {} ({secret_cases} secret, \
          {account_cases} account, {keystore_cases} keystore, {signing_cases} signing, \
          {terminal_cases} terminal), {} pass case(s), every fail case with a pinned .stderr",
+        registered.len(),
         fails.len(),
         passes.len()
     );
@@ -228,7 +243,19 @@ fn every_ui_case_compiles_or_fails_for_its_pinned_reason() {
     t.pass("ui/pass/*.rs");
 
     // Must not compile, each for the reason its .stderr records.
-    t.compile_fail("ui/fail/*.rs");
+    for case in registered {
+        t.compile_fail(std::path::Path::new("ui/fail").join(case.file_name().unwrap_or_default()));
+    }
+}
+
+/// Whether `case` pins something this platform builds: every case but the
+/// medium's two order pins, which belong to one platform's steps each.
+fn pinned_here(case: &std::path::Path) -> bool {
+    match stem(case).as_str() {
+        "medium_steps_are_not_reorderable" => cfg!(unix),
+        "medium_slot_steps_are_not_reorderable" => cfg!(windows),
+        _ => true,
+    }
 }
 
 /// A case's file stem, for the subject census above.

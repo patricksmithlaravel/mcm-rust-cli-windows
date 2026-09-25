@@ -20,6 +20,32 @@
 //! finding — `ui/fail/medium_steps_are_not_reorderable.rs` pins it. The
 //! tokens have private fields, so they cannot be forged outside the crate.
 //!
+//! # On Windows the steps are the slot layout's
+//!
+//! A Windows store is two slot files rewritten in place -- `super::slots` has
+//! the frame and the rule by which `open` takes the newer -- because Win32
+//! documents no way to commit the directory entry a rename writes. So the
+//! trait is a second one, under the same seal, whose steps are the layout's:
+//! `write_slot -> SlotWritten`, `flush_slot(SlotWritten) -> Flushed`, and
+//! `flush_standing`, which flushes a slot as it stands. The order is again
+//! crate-owned, in `Keystore::commit`: the slot holding the newest image is
+//! known to be on the device before the other is written, a write is flushed
+//! before `Durable` is minted, and a plain image in slot 0 is overwritten only
+//! once slot 1 holds a flushed frame.
+//! `ui/fail/medium_slot_steps_are_not_reorderable.rs` pins that a flush takes
+//! a write's token and nothing else.
+//!
+//! No step renames or deletes, and the one directory entry a step creates is
+//! a slot file's, when a store's first commit, or a migrating store's, writes
+//! a slot that is not there yet. The flush after it stores that entry: the
+//! `CreateFile` page's section on caching gives a file just created as its
+//! example of metadata that may still be cached and `FlushFileBuffers` as how
+//! to make sure it reaches the disk, and the File Caching page says the same
+//! of all a file's metadata. `sync_all` is that call, read in `std`'s Windows
+//! `fs` source. A flush that returned surviving a power cut rests on those
+//! pages and on the device honouring the flush it is sent, as an `fsync` on
+//! Unix rests on its own; nothing here can measure it.
+//!
 //! # What the instrumented medium models, and what it cannot
 //!
 //! [`Instrumented`] records every call **with its arguments** and can be told
@@ -33,9 +59,20 @@
 //! the wrong path keeps every count and every byte assertion green and is
 //! visible only here (the proof test's sequence assertion, and the paired
 //! injection that shows it).
+//!
+//! On Windows it can also tear a write: after the `k`-th call, a `write_slot`,
+//! it leaves the slot holding whatever bytes a `Tear` makes of the slot as
+//! it stood and the frame the write was asked for -- or no file, when the
+//! write was creating it -- and returns its error. That is what a power cut
+//! before the flush can leave of an unflushed write, in any mix of sectors
+//! and at either length, and it is how the layout's crash proofs reach it.
+//! What a tear cannot model is a flushed write lost, which is the premise the
+//! layout rests on and not a case it handles.
 
 use std::fs::{self, File};
 use std::io::Write;
+#[cfg(windows)]
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
 use super::perms;
@@ -43,12 +80,16 @@ use crate::error::{Error, Result};
 
 pub(crate) const SNAPSHOT_NAME: &str = "accounts.mks";
 pub(crate) const TEMP_NAME: &str = "accounts.mks.tmp";
+/// Slot 1's file name on Windows; slot 0's is [`SNAPSHOT_NAME`].
+#[cfg(windows)]
+pub(crate) const SLOT1_NAME: &str = "accounts.mks.1";
 
 mod sealed {
     pub trait Sealed {}
 }
 
 /// The temp file has been written in full (not yet flushed).
+#[cfg(unix)]
 pub struct Written {
     file: File,
     path: PathBuf,
@@ -57,22 +98,53 @@ pub struct Written {
 /// The temp file's bytes and metadata have reached the device (`sync_all`,
 /// not `sync_data`: a new inode's size and block map are metadata, which
 /// `fdatasync` may omit).
+#[cfg(unix)]
 pub struct Synced {
     path: PathBuf,
 }
 
 /// The temp has been renamed over the target; the directory entry may still
 /// be in an uncommitted journal transaction until `fsync_dir`.
+#[cfg(unix)]
 pub struct Renamed {
     _private: (),
 }
 
 /// The primitives. See the module doc for why the order is not here.
+#[cfg(unix)]
 pub trait Medium: sealed::Sealed {
     fn write_temp(&mut self, dir: &Path, image: &[u8]) -> Result<Written>;
     fn fsync_file(&mut self, written: Written) -> Result<Synced>;
     fn rename(&mut self, synced: Synced, dir: &Path) -> Result<Renamed>;
     fn fsync_dir(&mut self, renamed: Renamed, dir: &Path) -> Result<()>;
+}
+
+/// A slot has been written in full at its new length (not yet flushed).
+#[cfg(windows)]
+pub struct SlotWritten {
+    file: File,
+    path: PathBuf,
+}
+
+/// The slot just written is on the device, its data and its metadata:
+/// `FlushFileBuffers`, which writes both and then has the storage flush its
+/// own cache.
+#[cfg(windows)]
+pub struct Flushed {
+    _private: (),
+}
+
+/// The primitives, on Windows. See the module doc for why the order is not
+/// here.
+///
+/// A slot is named by its number, 0 or 1, and handed over as the handle the
+/// keystore holds for it: `None` when no file exists yet, which `write_slot`
+/// then creates and leaves in its place.
+#[cfg(windows)]
+pub trait Medium: sealed::Sealed {
+    fn flush_standing(&mut self, dir: &Path, slot: usize, held: &File) -> Result<()>;
+    fn write_slot(&mut self, dir: &Path, slot: usize, held: &mut Option<File>, frame: &[u8]) -> Result<SlotWritten>;
+    fn flush_slot(&mut self, written: SlotWritten) -> Result<Flushed>;
 }
 
 fn io(op: &'static str) -> impl Fn(std::io::Error) -> Error {
@@ -84,6 +156,7 @@ pub struct Disk;
 
 impl sealed::Sealed for Disk {}
 
+#[cfg(unix)]
 impl Medium for Disk {
     fn write_temp(&mut self, dir: &Path, image: &[u8]) -> Result<Written> {
         let path = dir.join(TEMP_NAME);
@@ -117,11 +190,10 @@ impl Medium for Disk {
     }
 
     fn rename(&mut self, synced: Synced, dir: &Path) -> Result<Renamed> {
-        fs::rename(&synced.path, dir.join(SNAPSHOT_NAME)).map_err(rename_refusal)?;
+        fs::rename(&synced.path, dir.join(SNAPSHOT_NAME)).map_err(io("rename"))?;
         Ok(Renamed { _private: () })
     }
 
-    #[cfg(unix)]
     fn fsync_dir(&mut self, _renamed: Renamed, dir: &Path) -> Result<()> {
         // On Apple targets std's sync_all is fcntl(F_FULLFSYNC) with no
         // fallback; it was measured succeeding on a directory fd on APFS.
@@ -130,100 +202,77 @@ impl Medium for Disk {
             .sync_all()
             .map_err(io("fsync_dir"))
     }
-
-    /// **The fourth step performs no I/O on Windows, and I3's power-loss
-    /// clause is not claimed there.**
-    ///
-    /// The Unix step cannot simply be compiled here. `File::open` on a
-    /// directory is `CreateFileW` without `FILE_FLAG_BACKUP_SEMANTICS`, which
-    /// Windows refuses, so that body fails every commit at its last step --
-    /// after the rename, on a handle that is then poisoned for a commit that
-    /// landed. Read in `std`'s Windows `fs` source, not run.
-    ///
-    /// Nor is there a substitute to put in its place. What the Unix step buys
-    /// is that the directory entry the rename wrote reaches the device before
-    /// [`crate::keystore::Durable`] is minted, so a power cut after the
-    /// receipt cannot bring back the previous snapshot. Win32 documents no
-    /// call that establishes that for a same-volume rename on NTFS:
-    /// `MOVEFILE_WRITE_THROUGH` is documented for a move performed as a copy
-    /// and a delete, and a directory handle opened for backup semantics and
-    /// flushed is behaviour no document states. Two candidates were weighed
-    /// and refused:
-    ///
-    /// * **Flush a directory handle opened with backup semantics.** It may
-    ///   commit the entry and may be refused; neither is documented, and a
-    ///   refusal here fails a commit whose rename already landed.
-    /// * **Reopen the snapshot under its new name and flush it.** That
-    ///   flushes the file, which the second step already did under the old
-    ///   name. Whether flushing a file also commits the journal record of the
-    ///   rename that named it is an NTFS implementation property this tree
-    ///   has not measured, and the reopen is a fresh chance for the sharing
-    ///   refusal `ReplaceRefused` names -- again after the rename.
-    ///
-    /// Either would make the claim sound stronger than anything measured,
-    /// which is the one thing this step must not do.
-    ///
-    /// # What that leaves, stated as a hazard and not as a footnote
-    ///
-    /// Every kill at a syscall boundary is still covered: the rename is
-    /// visible to every other process when it returns, and the proofs driven
-    /// through [`Instrumented`] are about exactly that. That rests on the
-    /// replacing move being atomic, which NTFS provides and Win32 does not
-    /// document -- the same reliance the keystore states for ext4 and APFS,
-    /// on one more filesystem. What is not covered is
-    /// **power loss or an operating-system crash between a commit and the
-    /// filesystem's own flush of its log**. After one, the previous snapshot
-    /// can come back. If that commit reserved a key and the spend it signed
-    /// has not yet settled, the store no longer records the reservation, and
-    /// the next spend can reserve and sign the same position again -- the
-    /// key reuse this wallet exists to refuse. Reconciliation catches it only
-    /// once the first spend has reached the chain.
-    ///
-    /// What would change this answer is a measurement, not an argument: a
-    /// power-cut test on NTFS under each candidate above.
-    #[cfg(windows)]
-    fn fsync_dir(&mut self, _renamed: Renamed, _dir: &Path) -> Result<()> {
-        Ok(())
-    }
 }
 
-/// The rename's failure, named when Windows reports a held file.
+/// The slot layout's steps, over the files themselves.
 ///
-/// On Unix every failure is the anonymous `Io` it always was: `rename(2)`
-/// is not refused because another process has either file open.
-#[cfg(unix)]
-fn rename_refusal(e: std::io::Error) -> Error {
-    io("rename")(e)
-}
-
-/// The rename's failure, named when Windows reports a held file.
-///
-/// `std`'s Windows `rename` is `MoveFileExW` with `MOVEFILE_REPLACE_EXISTING`,
-/// retried once through `FileRenameInfoEx` with POSIX semantics when the first
-/// attempt is `ERROR_ACCESS_DENIED`; if the retry also fails, the FIRST error
-/// is what comes back. So the codes arriving here are `MoveFileExW`'s, and
-/// the two a held source or target produces are the two matched below.
-/// `ERROR_SHARING_VIOLATION` has no `ErrorKind` in `std` and would reach the
-/// operator as `Uncategorized`, which is the other reason it needs a name.
+/// `write_slot` writes the frame from offset 0 and then sets the file's
+/// length to the frame's, so a slot is intact only when both the bytes and the
+/// length are the new ones; `super::slots` reads a slot of any other length as
+/// torn. A slot that does not exist yet is created under the protected list
+/// `perms` gives every store file, sharing read access only, like the handles
+/// `open` holds.
 #[cfg(windows)]
-fn rename_refusal(e: std::io::Error) -> Error {
-    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
-    match e.raw_os_error() {
-        Some(code) if code == ERROR_ACCESS_DENIED as i32 || code == ERROR_SHARING_VIOLATION as i32 => {
-            Error::ReplaceRefused { code }
-        }
-        _ => io("rename")(e),
+impl Medium for Disk {
+    fn flush_standing(&mut self, _dir: &Path, _slot: usize, held: &File) -> Result<()> {
+        held.sync_all().map_err(io("flush_standing"))
     }
+
+    fn write_slot(&mut self, dir: &Path, slot: usize, held: &mut Option<File>, frame: &[u8]) -> Result<SlotWritten> {
+        let path = slot_path(dir, slot);
+        let file = match held {
+            Some(file) => file,
+            None => held.insert(perms::create_slot(&path).map_err(io("write_slot create"))?),
+        };
+        overwrite(file, frame).map_err(io("write_slot"))?;
+        let file = file.try_clone().map_err(io("write_slot"))?;
+        Ok(SlotWritten { file, path })
+    }
+
+    fn flush_slot(&mut self, written: SlotWritten) -> Result<Flushed> {
+        written.file.sync_all().map_err(io("flush_slot"))?;
+        Ok(Flushed { _private: () })
+    }
+}
+
+/// Slot `slot`'s file in `dir`: 0 is the snapshot's own name.
+#[cfg(windows)]
+fn slot_path(dir: &Path, slot: usize) -> PathBuf {
+    dir.join(if slot == 0 { SNAPSHOT_NAME } else { SLOT1_NAME })
+}
+
+/// `bytes` from offset 0, and then the length set to theirs.
+#[cfg(windows)]
+fn overwrite(file: &mut File, bytes: &[u8]) -> std::io::Result<()> {
+    file.seek(SeekFrom::Start(0))?;
+    file.write_all(bytes)?;
+    file.set_len(bytes.len() as u64)
 }
 
 /// One recorded primitive call, with the arguments that matter.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Call {
+    #[cfg(unix)]
     WriteTemp { path: PathBuf, len: usize },
+    #[cfg(unix)]
     FsyncFile { path: PathBuf },
+    #[cfg(unix)]
     Rename { from: PathBuf, to: PathBuf },
+    #[cfg(unix)]
     FsyncDir { dir: PathBuf },
+    #[cfg(windows)]
+    FlushStanding { path: PathBuf },
+    #[cfg(windows)]
+    WriteSlot { path: PathBuf, len: usize },
+    #[cfg(windows)]
+    FlushSlot { path: PathBuf },
 }
+
+/// What a torn `write_slot` leaves: given the slot as it stood (`None` when
+/// the write was creating it) and the frame the write was asked for, the
+/// bytes the slot holds afterwards, or `None` for no file at all.
+#[cfg(windows)]
+pub type Tear = Box<dyn FnMut(Option<&[u8]>, &[u8]) -> Option<Vec<u8>>>;
 
 /// A recording, optionally interrupting decorator over any medium.
 pub struct Instrumented<M: Medium> {
@@ -232,6 +281,10 @@ pub struct Instrumented<M: Medium> {
     /// `(k, calls.len() when armed)`: the interruption fires on the k-th call
     /// **after arming**, so seeding calls recorded earlier do not shift it.
     stop_after: Option<(usize, usize)>,
+    /// `(k, calls.len() when armed, what the slot is left holding)`, counted
+    /// as `stop_after` counts.
+    #[cfg(windows)]
+    tear: Option<(usize, usize, Tear)>,
 }
 
 impl<M: Medium> Instrumented<M> {
@@ -240,6 +293,8 @@ impl<M: Medium> Instrumented<M> {
             inner,
             calls: Vec::new(),
             stop_after: None,
+            #[cfg(windows)]
+            tear: None,
         }
     }
 
@@ -247,6 +302,15 @@ impl<M: Medium> Instrumented<M> {
     /// primitive, return an error instead of its result. `None` disarms.
     pub fn stop_after(&mut self, k: Option<usize>) {
         self.stop_after = k.map(|k| (k, self.calls.len()));
+    }
+
+    /// Tear the `k`-th call (1-based, counted from this arming), which must
+    /// be a `write_slot`: once it has written, leave the slot holding what
+    /// `tear` makes of it, and return an error instead of its result. `None`
+    /// disarms.
+    #[cfg(windows)]
+    pub fn tear_after(&mut self, k: Option<usize>, tear: Tear) {
+        self.tear = k.map(|k| (k, self.calls.len(), tear));
     }
 
     pub fn calls(&self) -> &[Call] {
@@ -270,6 +334,7 @@ impl<M: Medium> Instrumented<M> {
 
 impl<M: Medium> sealed::Sealed for Instrumented<M> {}
 
+#[cfg(unix)]
 impl<M: Medium> Medium for Instrumented<M> {
     fn write_temp(&mut self, dir: &Path, image: &[u8]) -> Result<Written> {
         self.calls.push(Call::WriteTemp {
@@ -307,4 +372,71 @@ impl<M: Medium> Medium for Instrumented<M> {
         self.inner.fsync_dir(renamed, dir)?;
         self.interrupt_here("fsync_dir")
     }
+}
+
+#[cfg(windows)]
+impl<M: Medium> Medium for Instrumented<M> {
+    fn flush_standing(&mut self, dir: &Path, slot: usize, held: &File) -> Result<()> {
+        self.calls.push(Call::FlushStanding {
+            path: slot_path(dir, slot),
+        });
+        self.inner.flush_standing(dir, slot, held)?;
+        self.interrupt_here("flush_standing")
+    }
+
+    fn write_slot(&mut self, dir: &Path, slot: usize, held: &mut Option<File>, frame: &[u8]) -> Result<SlotWritten> {
+        let path = slot_path(dir, slot);
+        self.calls.push(Call::WriteSlot {
+            path: path.clone(),
+            len: frame.len(),
+        });
+        let calls = self.calls.len();
+        let tear = match &mut self.tear {
+            Some((k, armed_at, tear)) if calls == *armed_at + *k => Some(tear),
+            _ => None,
+        };
+        let Some(tear) = tear else {
+            let out = self.inner.write_slot(dir, slot, held, frame)?;
+            self.interrupt_here("write_slot")?;
+            return Ok(out);
+        };
+        let stood = match held.as_mut() {
+            Some(file) => Some(read_all(file).map_err(io("write_slot tear"))?),
+            None => None,
+        };
+        drop(self.inner.write_slot(dir, slot, held, frame)?);
+        match tear(stood.as_deref(), frame) {
+            Some(bytes) => {
+                if let Some(file) = held.as_mut() {
+                    overwrite(file, &bytes).map_err(io("write_slot tear"))?;
+                }
+            }
+            None => {
+                *held = None;
+                fs::remove_file(&path).map_err(io("write_slot tear"))?;
+            }
+        }
+        Err(Error::Io {
+            op: "write_slot",
+            kind: std::io::ErrorKind::Interrupted,
+        })
+    }
+
+    fn flush_slot(&mut self, written: SlotWritten) -> Result<Flushed> {
+        self.calls.push(Call::FlushSlot {
+            path: written.path.clone(),
+        });
+        let out = self.inner.flush_slot(written)?;
+        self.interrupt_here("flush_slot")?;
+        Ok(out)
+    }
+}
+
+/// Every byte of a slot file, from offset 0.
+#[cfg(windows)]
+fn read_all(file: &mut File) -> std::io::Result<Vec<u8>> {
+    file.seek(SeekFrom::Start(0))?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes)?;
+    Ok(bytes)
 }

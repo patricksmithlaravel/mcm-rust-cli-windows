@@ -61,9 +61,11 @@
 //!
 //! # Where this is compiled
 //!
-//! Under `cfg(test)`, on every platform, so these rules are tested on every
-//! board against images the format itself seals. The Windows write path that
-//! will call them outside a test is not in this tree yet.
+//! On Windows, where `Keystore::open_with` and the commit call it, and under
+//! `cfg(test)` on every platform, so these rules are tested on every board
+//! against images the format itself seals. The write path and the reads
+//! through held handles are Windows code in `medium` and the keystore, and
+//! only a Windows runner runs them.
 
 use zeroize::Zeroizing;
 
@@ -78,6 +80,9 @@ const CHECK_LEN: usize = 32;
 
 /// What a frame adds to its payload: forty-six bytes.
 pub(crate) const OVERHEAD: usize = HEAD_LEN + CHECK_LEN;
+
+/// The longest slot file this build writes, and the most `open` reads of one.
+pub(crate) const MAX_FRAME_LEN: usize = OVERHEAD + format::MAX_IMAGE_LEN;
 
 /// The frame around `image`, or around nothing: the vacant frame.
 ///
@@ -142,6 +147,9 @@ pub(crate) fn sort(bytes: Option<Zeroizing<Vec<u8>>>) -> Result<Content> {
     };
     if bytes.get(..MAGIC.len()) != Some(&MAGIC[..]) {
         return Ok(Content::Other(bytes));
+    }
+    if bytes.len() > MAX_FRAME_LEN {
+        return Ok(Content::Torn);
     }
     let Some((body, check)) = bytes
         .len()
@@ -352,6 +360,9 @@ mod tests {
         let mut longer = Zeroizing::new(whole.to_vec());
         longer.push(0);
         assert!(matches!(sort(Some(longer)), Ok(Content::Torn)), "a frame with a byte after it was not torn");
+        let mut too_long: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; MAX_FRAME_LEN + 1]);
+        too_long[..MAGIC.len()].copy_from_slice(&MAGIC);
+        assert!(matches!(sort(Some(too_long)), Ok(Content::Torn)), "a frame longer than any this build writes was not torn");
         for at in 0..whole.len() {
             for bit in 0..8 {
                 let mut changed = Zeroizing::new(whole.to_vec());

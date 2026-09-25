@@ -92,12 +92,14 @@
 //!
 //! **Run:** `./board check` passes on a GitHub Windows runner -- Windows
 //! Server 2025, build 26100 -- where every store the tests open is checked by
-//! this file and the keystore makes its lock and temp files through it, and
-//! the three `cfg(windows)` tests in `tests/keystore.rs` pass:
-//! `open_refuses_a_directory_everyone_can_write_to`,
-//! `a_store_created_under_a_writable_parent_inherits_nothing_from_it` and
-//! `a_snapshot_held_open_without_delete_sharing_refuses_the_commit_by_name`.
-//! `FORK.md` records the run.
+//! this file and the keystore makes its lock through it, and where
+//! `open_refuses_a_directory_everyone_can_write_to` and
+//! `a_store_created_under_a_writable_parent_inherits_nothing_from_it`, two of
+//! the `cfg(windows)` tests in `tests/keystore.rs`, pass. `FORK.md` records
+//! the runs. **Not run yet:** `create_slot` and `open_slot`, through which
+//! the slot layout makes and opens every store file on Windows, and
+//! `a_slot_held_open_without_write_sharing_refuses_the_open_by_name`, which
+//! measures the refusal the second makes.
 //!
 //! **Not established:** the runner's account is an elevated administrator,
 //! and a directory it creates is owned by the Administrators group, so the
@@ -111,12 +113,14 @@ use std::fs::{self, File};
 use std::io;
 use std::marker::PhantomData;
 use std::os::windows::ffi::OsStrExt;
+use std::os::windows::fs::OpenOptionsExt;
 use std::os::windows::io::{FromRawHandle, OwnedHandle};
 use std::path::Path;
 use std::ptr;
 
 use windows_sys::Win32::Foundation::{
-    LocalFree, ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE, INVALID_HANDLE_VALUE,
+    LocalFree, ERROR_SHARING_VIOLATION, ERROR_SUCCESS, GENERIC_ALL, GENERIC_READ, GENERIC_WRITE, HANDLE,
+    INVALID_HANDLE_VALUE,
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
@@ -159,9 +163,15 @@ const WRITE_RIGHTS: u32 = FILE_ADD_FILE
     | GENERIC_WRITE
     | GENERIC_ALL;
 
-/// The share mode `std`'s `OpenOptions` opens with by default, so a file
-/// created here is shared exactly as one created through `std` would be.
+/// The share mode `std`'s `OpenOptions` opens with by default, so the lock
+/// file is shared exactly as one created through `std` would be.
 const STD_SHARE_MODE: u32 = FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE;
+
+/// The share mode a slot file is held with: read, and nothing else. While a
+/// handle holds its slots no other process can write, rename or delete one --
+/// the way a flushed write could stop being the file the next `open` reads --
+/// and a reader, a scanner or a backup that only reads, still can.
+const SLOT_SHARE_MODE: u32 = FILE_SHARE_READ;
 
 /// Refuse a store directory another local user could write to.
 ///
@@ -233,14 +243,50 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Create a file under a protected list granting this user full control,
-/// failing if it already exists.
+/// Create a slot file under a protected list granting this user full
+/// control, failing if it already exists, held for reading and writing and
+/// shared for reading alone.
 ///
-/// The Windows arm of [`super`]'s function by this name: write access,
-/// `CREATE_NEW`, and `FILE_FLAG_OPEN_REPARSE_POINT` because that is what
-/// `std` adds for `create_new` -- a link at the path is not followed.
-pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
-    open_under_private_list(path, GENERIC_WRITE, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT)
+/// Where the Unix arm has `create_private_file` for the temp a rename
+/// replaces the snapshot with, this arm has the slot files the layout writes
+/// in place, and no temp. `CREATE_NEW`, and `FILE_FLAG_OPEN_REPARSE_POINT`
+/// because that is what `std` adds for `create_new` -- a link at the path is
+/// not followed.
+pub(crate) fn create_slot(path: &Path) -> io::Result<File> {
+    open_under_private_list(
+        path,
+        GENERIC_READ | GENERIC_WRITE,
+        SLOT_SHARE_MODE,
+        CREATE_NEW,
+        FILE_FLAG_OPEN_REPARSE_POINT,
+    )
+}
+
+/// Open a slot file that exists, for reading and writing, shared for reading
+/// alone; `None` when there is no such file.
+///
+/// A program already holding the file without sharing write -- an antivirus
+/// scanner, an indexer, a backup or sync agent -- makes the open fail with
+/// `ERROR_SHARING_VIOLATION`, and that is `Error::HeldOpen`, met at `open`,
+/// before anything is read or reserved. Every other failure is `Io`. The list
+/// the file already has is left as it is, as the Unix arm leaves a mode.
+pub(crate) fn open_slot(path: &Path) -> Result<Option<File>> {
+    match fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .share_mode(SLOT_SHARE_MODE)
+        .open(path)
+    {
+        Ok(file) => Ok(Some(file)),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => match e.raw_os_error() {
+            Some(code) if code == ERROR_SHARING_VIOLATION as i32 => Err(Error::HeldOpen { code }),
+            _ => Err(Error::Io {
+                op: "open slot",
+                kind: e.kind(),
+            }),
+        },
+    }
 }
 
 /// Open the lock file, creating it under a protected list granting this user
@@ -249,10 +295,10 @@ pub(crate) fn create_private_file(path: &Path) -> io::Result<File> {
 /// `OPEN_ALWAYS` is Win32's create-if-absent without truncation, and the list
 /// applies only when it creates -- the Unix arm's mode rule, unchanged.
 pub(crate) fn open_private_lock(path: &Path) -> io::Result<File> {
-    open_under_private_list(path, GENERIC_READ | GENERIC_WRITE, OPEN_ALWAYS, 0)
+    open_under_private_list(path, GENERIC_READ | GENERIC_WRITE, STD_SHARE_MODE, OPEN_ALWAYS, 0)
 }
 
-fn open_under_private_list(path: &Path, access: u32, disposition: u32, flags: u32) -> io::Result<File> {
+fn open_under_private_list(path: &Path, access: u32, share: u32, disposition: u32, flags: u32) -> io::Result<File> {
     let descriptor = Private::descriptor(Inherit::Nothing)?;
     let attributes = descriptor.attributes();
     let path = wide(path)?;
@@ -264,7 +310,7 @@ fn open_under_private_list(path: &Path, access: u32, disposition: u32, flags: u3
         CreateFileW(
             path.as_ptr(),
             access,
-            STD_SHARE_MODE,
+            share,
             &attributes.raw,
             disposition,
             FILE_ATTRIBUTE_NORMAL | flags,
