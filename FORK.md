@@ -978,13 +978,17 @@ arm's head and the allow-list's comment, which gave a Unix host as the
 reason Miri walks none of that arm, now give the Windows target's reason
 beside it.
 
-`cargo deny check` is red at `76225ac`, and by the argument above on every
+`cargo deny check` was red at `76225ac`, and by the argument above on every
 host: RUSTSEC-2026-0285, in `rustls` 0.23.43, which `ureq` brings in under
 `mesh-https` -- TLS 1.3 handshake messages accepted across a change of
 encryption level. The advisory's fix is 0.23.45, and `cargo update -p
-rustls --dry-run` moves that one package and nothing else. Rep-0's lockfile
-carries the same line, so the change is made there and comes down by
-merge; until it does, no row can be green.
+rustls --dry-run` moved that one package and nothing else. Rep-0's lockfile
+carried the same line, so the change was made there, as `4a3e420`, and came
+down in `be28279`, whose change to this tree has the same `git patch-id
+--stable` as Rep-0's commit. On the merge, `cargo deny check` reads
+`advisories ok, bans ok, licenses ok, sources ok` on this macOS host, and
+both of `RELEASE.md`'s MSRV commands exit 0 on 1.89.0. No Windows row has
+compiled 0.23.45 yet.
 
 ### R1-7 -- the surface check **(done, 2026-09-22)**
 
