@@ -236,35 +236,43 @@ figure with the latest deltas added to it. **No check reads the total**:
 `cfg` site counts and never for the board, and nothing else in the tree names
 it, so a person adding the line up is the only check there will ever be.
 
-The board on commit `5e0726b`, cargo's exit read from its own process: exit 0,
-**385 passed** -- summed from its own seventeen result lines -- 0 failed, 0
-ignored, 17 result lines, 5 m 05 s on a warm `target/`, read from `./board`'s
+The board on commit `da9ed86`, cargo's exit read from its own process: exit 0,
+**395 passed** -- summed from its own seventeen result lines -- 0 failed, 0
+ignored, 17 result lines, 4 m 45 s on a warm `target/`, read from `./board`'s
 own total -- it brackets the run with `date`, so the figure is wall clock
 around the run being reported rather than estimated from a previous one. **The commit is named
 by its hash rather than pointed at, because a commit cannot contain its own
 hash**: a sentence that says *this commit* is true when it is written and
-false at the next one. A reader runs `git diff 5e0726b` and, if nothing
+false at the next one. A reader runs `git diff da9ed86` and, if nothing
 outside the documents moved, these figures are still theirs; if something did,
 the remedy is to run the board and write down what it says, never to carry
-these numbers forward. The figure to compare across runs is the per-target
-one: lib 44, cli 111, compile_fail 1,
-derive 10, invariants 68, kat 18, keystore 33, mesh 13, mesh_http 10, miri 2,
-net 3, recon 29, signing 17, spend 19, txwire 3, wots_internals 4,
-doc-tests 0. Those are a macOS run's figures; on Windows `cli` runs eighteen
-fewer and `keystore` swaps three mode-bit tests for three access-list tests
-and runs one fewer, `create`'s parent-flush test being Unix's alone, which
-`RELEASE.md` records beside the gate that asks for these figures.
+these numbers forward. At a release the commit named is the one `RELEASE.md`
+verifies, and this section is written in that commit's child, which the tag
+names: *Two commits and a tag* there says why. The figure to compare across
+runs is the per-target one: lib 45, cli 111, compile_fail 1,
+derive 10, invariants 70, kat 18, keystore 34, mesh 13, mesh_http 10, miri 2,
+net 3, recon 35, signing 17, spend 19, txwire 3, wots_internals 4,
+doc-tests 0.
+Those are a macOS run's figures, and Rep-0's: they are of the commit its
+release verified, and this tree's own come with its own release, where on
+macOS the library runs the slot layout's seven unit tests more. On Windows
+`cli` runs eighteen fewer and `keystore` swaps three mode-bit tests for three
+access-list tests and runs one fewer, `create`'s parent-flush test being
+Unix's alone, which `RELEASE.md` records beside the gate that asks for these
+figures.
 
 Three things about running it. The `cli` target's eighteen `pty::` tests build
-the shipped binary with `--features mesh-https` and drive it under BSD
-`script(1)`; they need `cargo` on the path and a host whose `script` accepts
-`-q /dev/null cmd args`, and the count is whatever `cargo test -q -p
+the shipped binary with `--features mesh-https` and drive it under
+`script(1)`, in the two forms `tests/cli.rs`'s `script_command` knows: BSD's
+on macOS, which takes `-q /dev/null cmd args`, and util-linux's on Linux,
+which takes the command as one string after `-q -e -c`. They need `cargo` on
+the path and one of those two, and the count is whatever `cargo test -q -p
 mochimo-crypto --test cli -- --list | grep -c 'pty::'` prints. On Windows the
 module is compiled out -- the harness has no Windows counterpart -- and
 `RELEASE.md` says what that leaves unreached. The
 `invariants` target's census spawns `cargo test --workspace --no-run` and the
 sibling binaries, so it has to be run *by* `cargo test` and never by invoking
-the test binary directly. And `kat.rs` replays all 5,364 vectors twice, 111 s
+the test binary directly. And `kat.rs` replays all 5,364 vectors twice, 108 s
 of the run above in a debug build -- over a third of it, and the reason the
 board is minutes rather than seconds.
 

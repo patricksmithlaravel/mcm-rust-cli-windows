@@ -10,17 +10,28 @@
 # the foot of this file, says why it is a job apart. FORK.md, under R1-6,
 # records what the runs have established and what they have not.
 #
+# REP-0 CARRIES THIS FILE'S LINUX AND macOS HALF. Its `b293a6d` made that half
+# from this file, and it came down as FORK.md said a workflow Rep-0 takes
+# would: made there, and merged here. This copy is that file with Windows
+# added: the third matrix entry in each job, and the steps and reasons only
+# Windows needs.
+#
 # IT GATES NOTHING, AND IT RUNS ONLY WHEN A PERSON ASKS. RELEASE.md calls itself
 # the manual replacement for automated verification, and this does not replace
 # it. There is no `pull_request` trigger and no required check; nothing here
 # writes the record, and a green run is not a row in it -- the record is for
-# `verify`, of which a green Windows job is one part of three, the part that
-# needs Windows. A run starts when someone pushes a branch whose name begins
+# `verify`; a green Linux or Windows job is one part of three, the part that
+# needs that OS. A run starts when someone pushes a branch whose name begins
 # `board/`, which works before this file reaches the default branch, or
 # dispatches the workflow from the Actions tab, which works only after. What a
 # run leaves is a log. A person reads it and writes down what it says; GitHub
 # deletes the log when its retention period ends, which is one more reason the
 # record is kept in RELEASE.md and not here.
+#
+# A GREEN macOS JOB IS NO PART OF THE RECORD. The `macos` row is
+# `./board verify` run whole on a macOS host, which this tree is developed on.
+# The macOS job is the same commit's board, built cold on a machine that is
+# not that one, beside the others for a reader to compare.
 #
 # PUSH THE `board/` BRANCH ON ITS OWN. Measured on this repository: one
 # `git push` that moved `phase-1` and created `board/phase-1` together started
@@ -33,10 +44,11 @@
 # which AGENT.md puts at hours rather than minutes. A hosted job is stopped
 # at six hours, and whether Miri on these runners finishes inside that has not
 # been measured. RELEASE.md's tag gate still asks for `verify` on each
-# platform, and takes the Windows one in its parts: this workflow's Windows
-# job for `check`, and `cargo deny` and Miri for the Windows target from any
-# host, since neither's verdict depends on the host that runs it. Its gate
-# says why, and what Miri for that target does and does not reach.
+# platform, and takes the Linux and Windows ones in their parts: this
+# workflow's Linux and Windows jobs for `check`, and `cargo deny` and Miri for
+# each target from any host, since neither's verdict depends on the host that
+# runs it. Its gates say why, and what Miri for each target does and does not
+# reach.
 #
 # NO ACTIONS. Every step is a command against tools the runner image already
 # carries: git, rustup, a C compiler for `ring`. A `uses:` line is another
@@ -46,8 +58,13 @@
 # The cost is stated rather than hidden: no dependency cache, so every run
 # builds cold; and no uploaded artifact, so the transcript is the job log.
 #
-# WHAT A GREEN RUN DOES NOT SAY. Everything RELEASE.md says a green Windows
-# board does not say, and one thing more. GitHub documents its Windows runners
+# WHAT A GREEN RUN DOES NOT SAY. Everything RELEASE.md says a green board
+# does not say, and anything about a host but the one it ran on. The lock and
+# the mode-bit refusal rest on the filesystem and the umask a host gives them,
+# which RELEASE.md calls properties of the host and not of the source, and a
+# runner measures its own. The step that names the commit prints the image
+# and the kernel, so a reader can tell which host a result is about. On
+# Windows, one thing more. GitHub documents its Windows runners
 # as administrators with User Account Control disabled, and the step before
 # the board shows what that means here: the built-in administrator, at High
 # mandatory level, and a new directory owned by the Administrators group. So
@@ -79,7 +96,7 @@ jobs:
       matrix:
         # `-latest` rather than a pinned image. What the record needs is the
         # host a run happened on, and the job prints that -- the image by name
-        # and version below, the kernel in the board's own summary. A pinned
+        # and version below, and the kernel after it. A pinned
         # image stops starting when GitHub retires it, which is a red run no
         # commit caused; `-latest` moves without a commit instead, and the
         # printed image is what makes two runs comparable either way.
@@ -93,6 +110,8 @@ jobs:
     timeout-minutes: 120
     defaults:
       run:
+        # Named, so that every step runs as `bash --noprofile --norc -e -o
+        # pipefail`, which is what the log prints for a named `bash`.
         # On Windows this is Git Bash, the shell RELEASE.md names there.
         shell: bash
     steps:
@@ -180,8 +199,10 @@ jobs:
   # pins the board to one compiler, so no board row compiles this tree on the
   # `rust-version` the workspace declares, and RELEASE.md carries the two
   # commands that do as a gate before a tag -- on every platform, because the
-  # Windows arms compile only on Windows and a Unix host's check says nothing
-  # about them. This job runs those two commands and nothing else.
+  # Windows arms compile only on Windows, and code a dependency has for one
+  # target compiles only for that target -- `sha2`'s backends, and `ring`'s C
+  # and assembly -- so one host's check says nothing about another's. This job
+  # runs those two commands and nothing else.
   #
   # A JOB APART, and not two more steps of `check`, so that the board's job
   # keeps meaning the board: a red here is a finding about the manifest's

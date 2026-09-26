@@ -17,12 +17,14 @@ rust-version = "1.89"
 # crate inherits this declaration from the workspace.
 license-file = "LICENSE.md"
 
-# Both values below are cargo's own defaults for a release build. They are
-# written out because a default is not a decision: with no `[profile.release]`
-# section at all, this wallet got unwinding destructors because that is what
-# cargo happens to do, and nothing in the tree said it mattered. Profiles are
-# only read from the workspace root, which is why they are here and not in
-# `crates/mochimo-crypto/Cargo.toml`.
+# `panic` below is cargo's own default for a release build and
+# `overflow-checks` is not: cargo turns overflow checks off in a release
+# build, and this file turns them on, for the reason given beside it. The
+# default is written out anyway because a default is not a decision: with no
+# `[profile.release]` section at all, this wallet got unwinding destructors
+# because that is what cargo happens to do, and nothing in the tree said it
+# mattered. Profiles are only read from the workspace root, which is why they
+# are here and not in `crates/mochimo-crypto/Cargo.toml`.
 [profile.release]
 # PANIC = "UNWIND" IS A SECURITY PROPERTY HERE, not a preference, and it is the
 # one line in this file that must not be traded for binary size.
