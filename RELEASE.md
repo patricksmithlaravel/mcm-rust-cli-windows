@@ -62,7 +62,8 @@ run, on every platform, at the commit being tagged.
       figure that moved is re-read rather than adjusted. **The figures are
       per platform**: on Windows the `cli` target has eighteen fewer tests,
       because the `pty::` module is Unix-only, and `keystore` runs three
-      access-list tests in place of three mode-bit tests. AGENT.md's figures
+      access-list tests in place of three mode-bit tests and one fewer in
+      all, `create`'s parent-flush test being Unix's alone. AGENT.md's figures
       are for the platform its board section names.
 - [ ] `AGENT.md`'s board section names the commit being tagged.
 - [ ] The version in `crates/mochimo-crypto/Cargo.toml` is the version being

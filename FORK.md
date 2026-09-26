@@ -938,7 +938,7 @@ the branch is pushed alone. Its Linux and macOS jobs are coverage Rep-0 lacks
 as much as this tree does. If Rep-0 takes a workflow of its own, it is made
 there and flows down, and this file keeps only what Windows adds.
 
-**Eight runs, 2026-09-24 and 25.** Each figure is summed from that job's own
+**Nine runs, 2026-09-24 and 25.** Each figure is summed from that job's own
 seventeen result lines, read with `gh run view <run> --job <job> --log`:
 
 | run | commit | Linux | macOS | Windows |
@@ -951,9 +951,11 @@ seventeen result lines, read with `gh run view <run> --job <job> --log`:
 | 36095852071 | `764e7be` | green, 400 passed | green, 400 passed | green, 382 passed |
 | 36106141274 | `cb933ce` | green, 400 passed | seven rows green; `test` red, 399 passed and 1 failed; re-run green, 400 passed | green, 382 passed |
 | 36188984261 | `e451bde` | green, 400 passed | green, 400 passed | green, 382 passed |
+| 36203309483 | `ab74b8a` | green, 402 passed | green, 402 passed | green, 383 passed |
 
-Nothing was ignored on any platform. Windows runs eighteen fewer: the
-`pty::` tests its gate removes. The third run is of the tree after Rep-0's
+Nothing was ignored on any platform. Windows runs eighteen fewer through
+the eighth run -- the `pty::` tests its gate removes -- and nineteen in the
+ninth, whose `create` parent-flush test is `cfg(unix)`. The third run is of the tree after Rep-0's
 `0c12e38` came down, so its Linux and macOS `pty::` tests drive the binary's
 reads through `read_scrubbed_line`, and it is the first run of the workflow's
 `msrv` job: on 1.89.0, read from the manifest's `"1.89"`, both of
@@ -975,6 +977,14 @@ all three again. The seventh runs Rep-0's `rustls` 0.23.45, merged down in
 compiled it natively, and the `msrv` job compiled it on 1.89.0 on all three
 and is green on each. The eighth runs Rep-0's remedy for the seventh's one
 red, which the next paragraph describes, and is green in all six jobs.
+The ninth runs Rep-0's parent flush and this tree's Windows answer to it,
+merged down in `e43a70d`, green in all six jobs at the first attempt. Linux
+and macOS gain `parent_of`'s unit test and `create`'s parent-flush test,
+for 402; Windows gains the unit test alone, for 383, and passed it natively
+as well as `medium_sequence_is_exactly_the_slot_steps_with_their_arguments`,
+whose `create` now records the parent named first -- so the Windows no-op
+and its record have run there. `cli` is 111 against Windows' 93 and
+`keystore` 34 against 33, read from each job's result lines.
 
 The seventh's one red was on macOS, in
 `pty::submit_on_a_real_pty_ships_a_saved_artifact_and_opens_no_store`, and
@@ -1010,8 +1020,9 @@ each of the third and fourth runs the Windows board job had `win25-vs2026`
 20260907.229.1 while the Windows `msrv` job had 20260922.246.2, where in the
 fifth both had 20260907.229.1, in the sixth both had 20260922.246.2, in
 the seventh the board job had 20260907.229.1 and the `msrv` job
-20260922.246.2 again, and in the eighth both had 20260922.246.2 -- the
-`-latest` trade the workflow's head makes, recorded by the runs themselves.
+20260922.246.2 again, and in the eighth and the ninth both had
+20260922.246.2 -- the `-latest` trade the workflow's head makes, recorded by
+the runs themselves.
 
 The first run's four reds were two findings, both in the test tree and both
 fixed at their sites: three invariant guards demanded `pty::` tests that

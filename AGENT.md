@@ -251,8 +251,9 @@ one: lib 44, cli 111, compile_fail 1,
 derive 10, invariants 68, kat 18, keystore 33, mesh 13, mesh_http 10, miri 2,
 net 3, recon 29, signing 17, spend 19, txwire 3, wots_internals 4,
 doc-tests 0. Those are a macOS run's figures; on Windows `cli` runs eighteen
-fewer and `keystore` swaps three mode-bit tests for three access-list tests,
-which `RELEASE.md` records beside the gate that asks for these figures.
+fewer and `keystore` swaps three mode-bit tests for three access-list tests
+and runs one fewer, `create`'s parent-flush test being Unix's alone, which
+`RELEASE.md` records beside the gate that asks for these figures.
 
 Three things about running it. The `cli` target's eighteen `pty::` tests build
 the shipped binary with `--features mesh-https` and drive it under BSD
