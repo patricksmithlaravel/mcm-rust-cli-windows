@@ -230,7 +230,7 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | `tests/cli.rs` | one attribute: the `pty` module is `cfg(all(unix, not(miri)))` | its harness is `script(1)`; no assertion changes, which is what the rule about this file protects |
 | `tests/mesh_http.rs` | the refused-connection test has its own five-second connect timeout in place of the shared 500 ms | Windows retries a connect a port refused before reporting it, and on a Windows runner the shared timeout ran out first; Linux and macOS refuse at once, so on Rep-0's platforms the change is inert |
 | `.gitattributes` | every text file checked out with LF, and no `.bin` file converted in either direction | Git for Windows checks out CRLF by default, and the source scans, the JSON fixtures and the trybuild expectations are read byte for byte; two `.bin` fixtures are printable text to git's detection, so the binary files are named rather than detected |
-| `AGENT.md` | the board runs under Git Bash on Windows; the `pty::` count and the board figures are per platform; a workflow runs the board, and the MSRV check beside it, on all three platforms when asked | the board is defined there, and its platform list is what widened |
+| `AGENT.md` | the board runs under Git Bash on Windows; the `pty::` count and the board figures are per platform; the workflow runs the board, and the MSRV check beside it, on Windows as well as Linux and macOS | the board is defined there, and its platform list is what widened |
 
 #### What Rep-1 may not change
 
@@ -934,9 +934,13 @@ branch whose name begins `board/`, on its own. It gates nothing and writes no
 record; `RELEASE.md` says what it stands in for, and its own head argues the
 rest -- the clone under the user's profile, no actions, `-latest` images,
 `check` rather than `verify`, the minimum compiler as a job apart, and why
-the branch is pushed alone. Its Linux and macOS jobs are coverage Rep-0 lacks
-as much as this tree does. If Rep-0 takes a workflow of its own, it is made
-there and flows down, and this file keeps only what Windows adds.
+the branch is pushed alone. Its Linux and macOS jobs were coverage Rep-0
+lacked as much as this tree did, and Rep-0 has taken them the way this
+paragraph said it would, made there and flowing down: `b293a6d` made its
+workflow from this file, less Windows, and it came down in `1b4b3f3`. This
+file is now Rep-0's with Windows added, and its head says so. Rep-0's runs
+of its copy came down in `RELEASE.md`, under a heading of their own; this
+tree's stay here.
 
 **Nine runs, 2026-09-24 and 25.** Each figure is summed from that job's own
 seventeen result lines, read with `gh run view <run> --job <job> --log`:
@@ -1050,10 +1054,14 @@ give it. Defender's real-time protection is off on the image, so the holder
 R1-4 names, a scanner, held nothing. Power loss is beyond any board. And
 `verify` -- the Miri run and `cargo deny` -- has not run on Windows.
 
-**On Linux** the eighteen `pty::` tests pass in all eight runs through
+**On Linux** the eighteen `pty::` tests pass in all nine runs through
 util-linux `script(1)`, the form `tests/cli.rs` described as written from the
 manual and never run. That comment was Rep-0's to correct: `7ed9eec` says
 the form has run, citing these runs, and it came down in `e43a70d`.
+Rep-0 has taken its Linux row in three parts since `b293a6d`, as this
+tree takes its Windows row, with its workflow's Linux job as the `check`
+part, and since `1b4b3f3` this tree's `RELEASE.md` takes both platforms
+that way.
 
 **`verify` on Windows, assembled (decided 2026-09-25).** `RELEASE.md`'s
 Windows row takes `./board verify` in its three parts, and only `check` has
@@ -1088,6 +1096,16 @@ target adds is Windows' `std` beneath the same tests, with the
 arm's head and the allow-list's comment, which gave a Unix host as the
 reason Miri walks none of that arm, now give the Windows target's reason
 beside it.
+
+Measured again at `1b4b3f3`, once Rep-0's 1.1.0 had come down, and for the
+Linux target on this tree for the first time: with MIRIFLAGS unset and
+nightly 1.100.0, `cargo +nightly miri test -p mochimo-crypto -- --list`
+names the same sixty-one tests for `aarch64-apple-darwin`,
+`x86_64-unknown-linux-gnu` and `x86_64-pc-windows-msvc`, compared by
+target and name: the library's forty-two, among them `parent_of`'s unit
+test, which came down in `e43a70d`; `derive`'s seven, `mesh`'s four,
+`net`'s three, `txwire`'s three and `miri`'s two; the other ten targets
+listing none.
 
 `cargo deny check` was red at `76225ac`, and by the argument above on every
 host: RUSTSEC-2026-0285, in `rustls` 0.23.43, which `ureq` brings in under

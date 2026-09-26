@@ -326,8 +326,8 @@ narrow.
   run does.** `cargo +nightly miri test -p mochimo-crypto -- --list`, with
   and without `--target`, names the same tests for the host and for each
   target, counted by their `: test` lines and compared by name -- measured
-  by Rep-0 for `x86_64-unknown-linux-gnu` at `c2b08ce`, and here for
-  `x86_64-pc-windows-msvc` at `76225ac`, as `FORK.md` records under R1-6.
+  here for both targets at `1b4b3f3`, as `FORK.md` records under R1-6, and
+  by Rep-0 for `x86_64-unknown-linux-gnu` at `c2b08ce`.
   Only the library, `derive`, `mesh`, `net`, `txwire` and `miri` list any;
   `cli`, `keystore` and `invariants` list none, and isolation refuses the
   file system, so none of the keystore's locking, flushing, renaming or
