@@ -360,9 +360,6 @@ mod tests {
         let mut longer = Zeroizing::new(whole.to_vec());
         longer.push(0);
         assert!(matches!(sort(Some(longer)), Ok(Content::Torn)), "a frame with a byte after it was not torn");
-        let mut too_long: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; MAX_FRAME_LEN + 1]);
-        too_long[..MAGIC.len()].copy_from_slice(&MAGIC);
-        assert!(matches!(sort(Some(too_long)), Ok(Content::Torn)), "a frame longer than any this build writes was not torn");
         for at in 0..whole.len() {
             for bit in 0..8 {
                 let mut changed = Zeroizing::new(whole.to_vec());
@@ -376,6 +373,26 @@ mod tests {
             }
         }
         assert_eq!(driven, 9 * whole.len(), "the walk did not drive every cut and every bit");
+    }
+
+    /// Not under Miri: its time is the wipe of the `MAX_FRAME_LEN + 1` bytes
+    /// `sort` drops, which `Zeroizing` makes through one `&mut u8` at a time,
+    /// and Miri tracks each of those borrows, so its time and memory grow
+    /// faster than the length (more than 5 h 50 m and 10 GB measured in each
+    /// of three Miri runs sharing a host, none of which finished it; 512 KiB
+    /// of the same wipe alone takes 113 s and 0.6 GB). What it pins is one
+    /// comparison, `bytes.len() > MAX_FRAME_LEN`, in safe code and ahead of
+    /// any hashing, and every board runs it natively. Under Miri nothing
+    /// reaches that comparison. The wipe itself is still interpreted, at a
+    /// few hundred bytes, for every frame
+    /// `a_frame_cut_short_lengthened_or_changed_in_one_bit_is_never_an_image`
+    /// cuts, lengthens or changes.
+    #[cfg(not(miri))]
+    #[test]
+    fn a_frame_longer_than_any_this_build_writes_is_torn() {
+        let mut too_long: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; MAX_FRAME_LEN + 1]);
+        too_long[..MAGIC.len()].copy_from_slice(&MAGIC);
+        assert!(matches!(sort(Some(too_long)), Ok(Content::Torn)), "a frame longer than any this build writes was not torn");
     }
 
     /// Every mix of an old frame and a new one, sector by sector, at the old
