@@ -68,10 +68,11 @@
 //! Entries that apply only to children are skipped, on the directory because
 //! a child's access is its own list's, which [`refuse_unsafe_file`] reads for
 //! every store file, and on a file because an entry for children applies to
-//! nothing a file has. Denying entries are skipped too, which makes the check stricter
-//! than the effective access it approximates: a grant followed by a denial of
-//! the same right is refused here although Windows would not honour it. That
-//! is the fail-closed direction, and computing effective access properly is
+//! nothing a file has. Denying entries are skipped too, which makes the check
+//! stricter than the effective access it approximates: a denial followed by a
+//! grant of the same right is refused here, although Windows, reading the list
+//! in order, meets the denial first and never honours that grant. That is
+//! the fail-closed direction, and computing effective access properly is
 //! `AuthzAccessCheck` and a resource manager, for a case no default access
 //! list produces. An entry of a type this check does not read is refused
 //! rather than skipped, for the same reason.

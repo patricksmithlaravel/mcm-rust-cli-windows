@@ -875,9 +875,13 @@ use console::{open_terminal, os_bytes, EchoGuard};
 ///   off in that console -- the Unix arm's `SIGINT` gap in another shape,
 ///   which the README's limits carry for signals. **Run, from PowerShell:**
 ///   the prompt's read returned no characters, the refusal printed was the
-///   end-of-input one, and the shell echoed afterwards, the guard having
-///   restored the mode before that refusal. Whether the handler ended the
-///   process after it, and whether the read returns first every time, is not
+///   end-of-input one, and what was typed at the shell afterwards showed.
+///   That is not the console's echo seen restored: PowerShell's line editor
+///   may draw what is typed itself, and the Command Prompt half of the
+///   check, which would show the console's own echo, is not in the results.
+///   The guard restores the mode before that refusal is printed, by the order
+///   of the code, not by a measurement. Whether the handler ended the process
+///   after it, and whether the read returns first every time, is not
 ///   established.
 /// * Under a terminal that is not a Windows console and hosts no
 ///   pseudo-console -- `mintty` without `winpty` -- `CONIN$` may open a
@@ -1122,9 +1126,13 @@ mod console {
     ///
     /// Read AND write on both names: `SetConsoleMode` needs the input buffer
     /// opened for both, and `GetConsoleMode` on the screen buffer does too.
-    /// `std` passes a name this short to `CreateFileW` unchanged, which is
-    /// what makes the two device names reachable through `OpenOptions` --
-    /// read in `std`'s Windows path source, not run.
+    /// `std` does not hand either name to `CreateFileW` as it is given: in
+    /// nightly's source, the one with `rust-src` on this host,
+    /// `maybe_verbatim` sends a short relative name through
+    /// `GetFullPathNameW` and puts `\\?\` before what comes back -- read,
+    /// not run. Both names reach the console all the same: the run at a
+    /// console that `FORK.md` records opened them through `OpenOptions`. How
+    /// the prefixed name resolves to the console is not established here.
     pub(super) fn open_terminal() -> Result<Tty, String> {
         let open = |name: &str| {
             std::fs::OpenOptions::new().read(true).write(true).open(name).map_err(|e| {

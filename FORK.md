@@ -929,12 +929,14 @@ expected. From Microsoft's documentation the module had the default control
 handler end the process at a prompt, running no destructor and leaving echo
 off. From PowerShell, `Ctrl-C` at the `password:` prompt produced the
 end-of-input refusal instead -- which here means a `ReadConsoleW` that
-returned no characters -- and `echo hello` at the shell afterwards was
-echoed. The guard restores the mode before that refusal prints, so the
-restored console follows from the order the code already has. Whether the
-handler ended the process after the refusal, which the unrecorded exit code
-would say, and whether the read returns first every time, is not
-established; the Command Prompt half of the check is not in the results.
+returned no characters -- and `echo hello` at the shell afterwards showed.
+That is not the console's echo seen restored: PowerShell's line editor may
+draw what is typed itself, and the Command Prompt half of the check, where
+the console's own echo would show, is not in the results. The guard
+restores the mode before that refusal prints, by the order of the code and
+not by a measurement. Whether the handler ended the process after the
+refusal, which the unrecorded exit code would say, and whether the read
+returns first every time, is not established.
 
 What the run does not establish: the access-list check met the
 Administrators group as the owner, as on the runner, because the session
@@ -1164,6 +1166,66 @@ everywhere and behave differently, becomes enumerable at all. A `cfg(windows)`
 planted in `cli/address.rs` fails it and the failure names the file.
 
 ---
+
+### Reviewed before the tag **(2026-09-27)**
+
+Before 1.1.0 was tagged at `3490102`, three read-only reviews read the
+Windows code this fork adds against its design and Microsoft's
+documentation: the slot layout's write path, the permission model, and the
+binary's console. The user held the tag and stopped the release's long runs
+for the findings that bear on what the release claims, and each was fixed
+before it:
+
+- `resign` could sign from an image `open` had read out of the cache after
+  a commit whose flush failed or whose process ended before it, and a power
+  cut taking that image back would then let the next `send` sign the same
+  key again. `open` flushes the newest slot before the handle exists and
+  refuses a store it cannot (`d9b360e`; R1-3).
+- `open` checked the store directory's list and never the files', which on
+  Windows are what decide who reaches a file. A slot or lock file anyone else
+  can read or write is refused (`f971dce`; R1-2).
+- R1-3 said `create` and the migrating commit were walked by the fault
+  injection, and nothing walked them. Two tests do (`6f731ae`).
+- The slot walk's frame longer than any this build writes held each Miri
+  run for hours in a 12.8 MB wipe; that case is a test of its own, kept off
+  Miri (`c7af912`).
+- Three statements were untrue and are corrected in the commit that records
+  this: the permission module had the order of a grant and a denial
+  backwards; R1-5 read `echo hello` showing in PowerShell as the console's
+  echo restored; and the binary said `std` hands `CONIN$` to `CreateFileW`
+  unchanged, where nightly's source sends it through `GetFullPathNameW` and
+  a `\\?\` prefix.
+
+Found and left for after 1.1.0, each failing closed, or an edge met only by
+moving the store's files by hand or at an unusual console:
+
+- `take` passes over a plain `accounts.mks` whose header disagrees with slot
+  1's -- another store copied over a Windows one with its `accounts.mks.1`
+  left behind -- and the next commit overwrites it. Refusing it is the fix.
+- The permission model's own Win32 calls take the path as given, so a store
+  directory whose path runs to about 245 UTF-16 units cannot be made or
+  opened, with an error naming a file that exists, where `std`'s calls beside
+  them add the `\\?\` prefix.
+- The console's restore puts back the mode it found, so with echo already
+  off the visible confirmation is typed blind; and `echo_off` does not set
+  processed input, so at a console another program left without it Enter
+  may never end the line.
+- The console host on Windows 10 may cap a cooked line at 254 UTF-16 units,
+  which would cut a longer password alike at both prompts; that comes from
+  the host's implementation, and nothing here read or measured it.
+- The visible confirmation's words go into the console's command history.
+- Upstream's, so Rep-0's to decide: a phrase pasted as two lines leaves its
+  second in the input for the shell, and a first line of twelve words passes
+  the checksum one time in sixteen and makes another wallet; and whether
+  Unix's `resign` has the first finding's shape after an interrupted
+  `fsync_dir`, which Rep-0 has been asked.
+
+Not established by the reviews: whether `GetNamedSecurityInfoW` follows a
+junction at the store's path; whether Explorer's move within a volume keeps
+a file's descriptor, as `MoveFileEx`'s page implies of a move; whether an
+unreadable sector refuses a store whose other slot is intact; and whether
+`FlushFileBuffers` reports data the cache failed to write before it was
+called.
 
 ## Fork point 2 -- Rep-2
 
