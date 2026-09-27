@@ -944,6 +944,235 @@ fn open_refuses_a_store_whose_newest_slot_it_cannot_flush() {
     assert!(keystore_harness::open(dir.path()).is_ok(), "the store does not open once the flush succeeds");
 }
 
+/// What a slot write torn by the two walks below leaves: 512-byte sectors of
+/// `frame` where `mask` has their bit and of what `stood` there elsewhere,
+/// zero past both, at `len` bytes -- or no file, for `None`, which only a
+/// write that creates the slot can leave.
+#[cfg(windows)]
+fn torn(stood: Option<&[u8]>, frame: &[u8], mask: usize, len: Option<usize>) -> Option<Vec<u8>> {
+    const SECTOR: usize = 512;
+    let len = len?;
+    let stood = stood.unwrap_or(&[]);
+    Some(
+        (0..len)
+            .map(|at| {
+                let source = if mask & (1 << (at / SECTOR)) != 0 { frame } else { stood };
+                source.get(at).copied().unwrap_or(0)
+            })
+            .collect(),
+    )
+}
+
+/// Every way the walks tear one write: no file, where the write creates the
+/// slot, and each mix of the frame's sectors with what stood, at the length
+/// that stood and at the frame's.
+#[cfg(windows)]
+fn tears(creates: bool, stood_len: usize, frame_len: usize) -> Vec<(usize, Option<usize>)> {
+    let sectors = stood_len.max(frame_len).div_ceil(512);
+    let mut out = if creates { vec![(0, None)] } else { Vec::new() };
+    for mask in 0usize..(1 << sectors) {
+        out.push((mask, Some(stood_len)));
+        out.push((mask, Some(frame_len)));
+    }
+    out
+}
+
+/// Whether a tear left exactly the frame: its full length, with every one of
+/// its sectors taken from it.
+#[cfg(windows)]
+fn left_the_frame(mask: usize, len: Option<usize>, frame_len: usize) -> bool {
+    len == Some(frame_len) && (0..frame_len.div_ceil(512)).all(|sector| mask & (1 << sector) != 0)
+}
+
+/// `create` stopped after each of its five steps, or with either of its two
+/// writes torn every way `tears` names, leaves no store or the whole of it.
+/// Until `accounts.mks` exists no store does, and `open` refuses the
+/// directory as `Missing`; once it exists, whatever the tear left in it,
+/// `open` takes the image `create` sealed, from slot 1, which was flushed
+/// before `accounts.mks` was written. A directory left holding slot 1 alone
+/// is refused by a later `create` as a store, since a store whose
+/// `accounts.mks` was deleted by hand looks the same (`occupied`); one left
+/// holding nothing takes a later `create`.
+#[cfg(windows)]
+#[test]
+fn create_stopped_or_torn_at_every_step_leaves_no_store_or_the_whole_one() {
+    const STEPS: [&str; 5] = ["fsync_parent", "write_slot", "flush_slot", "write_slot", "flush_slot"];
+    let control = ScratchDir::new("create-walk");
+    let ks = Keystore::create_with(control.path(), Instrumented::new(Disk), &keystore_harness::init())
+        .unwrap_or_else(|e| panic!("{e}"));
+    let sealed = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+    let calls = ks.medium().calls().to_vec();
+    let lens: Vec<usize> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::WriteSlot { len, .. } => Some(*len),
+            _ => None,
+        })
+        .collect();
+    assert_eq!((calls.len(), lens.len()), (STEPS.len(), 2), "create is not five calls with two writes: {calls:?}");
+    drop(ks);
+    let observe = |dir: &ScratchDir, at: &str| -> bool {
+        match keystore_harness::open(dir.path()) {
+            Err(Error::Missing) => {
+                let slot1 = dir.path().join("accounts.mks.1").exists();
+                let again = Keystore::create(dir.path(), &keystore_harness::init()).err();
+                let want = slot1.then_some(Error::Exists { what: "snapshot" });
+                assert_eq!(again, want, "{at}: a later create met {again:?} with slot 1 there: {slot1}");
+                false
+            }
+            Ok(ks) => {
+                let generation = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+                assert_eq!(generation, sealed, "{at}: the store opened at another generation than create sealed");
+                true
+            }
+            Err(e) => panic!("{at}: neither no store nor the whole one: {e}"),
+        }
+    };
+    let mut driven = 0usize;
+    for k in 1..=STEPS.len() {
+        let at = format!("create stop {k}");
+        let dir = ScratchDir::new("create-walk-stop");
+        let mut medium = Instrumented::new(Disk);
+        medium.stop_after(Some(k));
+        let err = Keystore::create_with(dir.path(), medium, &keystore_harness::init()).err();
+        assert_eq!(
+            err,
+            Some(Error::Io {
+                op: STEPS[k - 1],
+                kind: std::io::ErrorKind::Interrupted
+            }),
+            "{at}: not the injected error"
+        );
+        assert_eq!(observe(&dir, &at), k >= 4, "{at}: taken as the wrong side of create");
+        driven += 1;
+    }
+    for (k, frame_len) in [(2usize, lens[0]), (4, lens[1])] {
+        for (mask, len) in tears(true, 0, frame_len) {
+            let at = format!("create tear of call {k}, sectors {mask:#b}, {len:?} bytes");
+            let dir = ScratchDir::new("create-walk-tear");
+            let mut medium = Instrumented::new(Disk);
+            medium.tear_after(
+                Some(k),
+                Box::new(move |stood: Option<&[u8]>, frame: &[u8]| -> Option<Vec<u8>> { torn(stood, frame, mask, len) }),
+            );
+            let err = Keystore::create_with(dir.path(), medium, &keystore_harness::init()).err();
+            assert_eq!(
+                err,
+                Some(Error::Io {
+                    op: "write_slot",
+                    kind: std::io::ErrorKind::Interrupted
+                }),
+                "{at}: not the injected error"
+            );
+            assert_eq!(observe(&dir, &at), k == 4 && len.is_some(), "{at}: taken as the wrong side of create");
+            driven += 1;
+        }
+    }
+    println!("  create walk: {driven} interruption point(s), five stops and every tear of two writes");
+}
+
+/// The migrating commit -- the first a store in the rename layout takes on
+/// Windows: slot 1 written and flushed, then `accounts.mks` overwritten with
+/// the vacant frame and flushed -- stopped after each of its four steps, or
+/// with either write torn every way `tears` names, leaves the plain image or
+/// the new one, and `open` takes whichever it is without a refusal: the plain
+/// image while slot 1 holds no intact frame, the new one once it does.
+#[cfg(windows)]
+#[test]
+fn a_migrating_commit_stopped_or_torn_at_every_step_takes_the_plain_image_or_the_new_one() {
+    const STEPS: [&str; 4] = ["write_slot", "flush_slot", "write_slot", "flush_slot"];
+    // A store in the rename layout: made here, then its image written back as
+    // a plain `accounts.mks` with slot 1 removed, and opened again.
+    let seed = |dir: &ScratchDir| -> Keystore<Instrumented<Disk>> {
+        let mut ks = keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+        ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+        drop(ks);
+        let image = dir.snapshot_bytes();
+        dir.write_snapshot(&image);
+        let mut ks = keystore_harness::reopen_with("migrating walk", dir.path(), || Instrumented::new(Disk))
+            .result
+            .unwrap_or_else(|e| panic!("{e}"));
+        ks.medium_mut().reset_calls();
+        ks
+    };
+    let control = ScratchDir::new("migrating-walk");
+    let mut ks = seed(&control);
+    let plain_len = usize::try_from(
+        std::fs::metadata(control.path().join("accounts.mks")).unwrap_or_else(|e| panic!("{e}")).len(),
+    )
+    .unwrap_or_else(|e| panic!("{e}"));
+    let pre = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+    let _receipt = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).unwrap_or_else(|e| panic!("{e}"));
+    let calls = ks.medium().calls().to_vec();
+    let lens: Vec<usize> = calls
+        .iter()
+        .filter_map(|call| match call {
+            Call::WriteSlot { len, .. } => Some(*len),
+            _ => None,
+        })
+        .collect();
+    assert_eq!((calls.len(), lens.len()), (STEPS.len(), 2), "the migrating commit is not four calls with two writes: {calls:?}");
+    drop(ks);
+    let observe = |dir: &ScratchDir, at: &str| -> bool {
+        let ks = keystore_harness::open(dir.path()).unwrap_or_else(|e| panic!("{at}: the store was refused: {e}"));
+        let view = ks
+            .view(&IMPORTED_TAG)
+            .unwrap_or_else(|e| panic!("{e}"))
+            .unwrap_or_else(|| panic!("{at}: the imported account vanished"));
+        let post = view.pending.is_some();
+        let generation = ks.generation().unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(generation, if post { pre + 1 } else { pre }, "{at}: the generation and the reservation disagree");
+        post
+    };
+    let mut driven = 0usize;
+    for k in 1..=STEPS.len() {
+        let at = format!("migrating stop {k}");
+        let dir = ScratchDir::new("migrating-walk-stop");
+        let mut ks = seed(&dir);
+        ks.medium_mut().stop_after(Some(k));
+        let err = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err();
+        assert_eq!(
+            err,
+            Some(Error::Io {
+                op: STEPS[k - 1],
+                kind: std::io::ErrorKind::Interrupted
+            }),
+            "{at}: not the injected error"
+        );
+        drop(ks);
+        assert!(observe(&dir, &at), "{at}: slot 1 was written whole and the plain image was taken");
+        driven += 1;
+    }
+    for (k, creates, stood_len, frame_len) in [(1usize, true, 0usize, lens[0]), (3, false, plain_len, lens[1])] {
+        for (mask, len) in tears(creates, stood_len, frame_len) {
+            let at = format!("migrating tear of call {k}, sectors {mask:#b}, {len:?} bytes");
+            let dir = ScratchDir::new("migrating-walk-tear");
+            let mut ks = seed(&dir);
+            ks.medium_mut().tear_after(
+                Some(k),
+                Box::new(move |stood: Option<&[u8]>, frame: &[u8]| -> Option<Vec<u8>> { torn(stood, frame, mask, len) }),
+            );
+            let err = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).err();
+            assert_eq!(
+                err,
+                Some(Error::Io {
+                    op: "write_slot",
+                    kind: std::io::ErrorKind::Interrupted
+                }),
+                "{at}: not the injected error"
+            );
+            drop(ks);
+            // Slot 0 is overwritten only after slot 1 is flushed, so its tear
+            // leaves the new image standing; slot 1's leaves it only when the
+            // tear left the frame itself.
+            let whole = k == 3 || left_the_frame(mask, len, frame_len);
+            assert_eq!(observe(&dir, &at), whole, "{at}: taken as the wrong side of the commit");
+            driven += 1;
+        }
+    }
+    println!("  migrating walk: {driven} interruption point(s), four stops and every tear of two writes");
+}
+
 /// **`create` flushes the store directory's parent, once, before its first
 /// commit**, whether it made the directory or found it. The sequence a fresh
 /// `create` records is that flush, naming the directory that holds the store,

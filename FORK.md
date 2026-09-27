@@ -691,7 +691,14 @@ conversion this design does not provide.
   where one was being created. The I3 proof's Windows arm drives every step
   and every mix over the commits it walks and finds every member fully pre or
   fully post, and post once `flush_slot` has returned; the I2 proof's finds no
-  receipt escaping; `create` and the migrating commit are walked the same way.
+  receipt escaping; and `create` and the migrating commit are walked the same
+  way, by two tests of their own in `tests/keystore.rs`,
+  `create_stopped_or_torn_at_every_step_leaves_no_store_or_the_whole_one` and
+  `a_migrating_commit_stopped_or_torn_at_every_step_takes_the_plain_image_or_the_new_one`,
+  which stop after every step and tear each write every way -- no file where
+  it creates one, and each mix of sectors at either length -- and find no store
+  or the whole of it after `create`, and the plain image or the new one after
+  the migrating commit.
   Both proofs keep their names, so the census asks for them on Windows as on
   Unix, and I3's floor of four is met by two steps over two commits before a
   single mix is counted.
