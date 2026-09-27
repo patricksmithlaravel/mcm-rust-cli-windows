@@ -862,9 +862,9 @@ fn medium_sequence_is_exactly_the_four_steps_with_their_arguments() {
 /// `create` first names the store directory's parent to `fsync_parent`, a
 /// call Windows answers with nothing flushed and `Instrumented` records so
 /// the sequence keeps Unix's shape, and then writes slot 1 and slot 0's
-/// vacant frame; a handle's later commits alternate; and a handle opened on
-/// a store flushes the newest slot as it found it before its first write,
-/// which a handle that wrote the store itself has no need to.
+/// vacant frame; a handle's later commits alternate; and `open` flushes the
+/// newest slot as it found it before the handle exists, so a reopened
+/// handle's commits are the same two steps as any other's.
 #[cfg(windows)]
 #[test]
 fn medium_sequence_is_exactly_the_slot_steps_with_their_arguments() {
@@ -899,17 +899,49 @@ fn medium_sequence_is_exactly_the_slot_steps_with_their_arguments() {
     let mut ks = keystore_harness::reopen_with("sequence", dir.path(), || Instrumented::new(Disk))
         .result
         .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        ks.medium().calls(),
+        &[Call::FlushStanding { path: slot1 }],
+        "open did not flush the newest slot, slot 1, before the handle existed"
+    );
+    ks.medium_mut().reset_calls();
     ks.persist_settled(&IMPORTED_TAG).unwrap_or_else(|e| panic!("{e}"));
     let len = OVERHEAD + read_snapshot(&dir).len();
     assert_eq!(
         ks.medium().calls(),
-        &[
-            Call::FlushStanding { path: slot1 },
-            Call::WriteSlot { path: slot0.clone(), len },
-            Call::FlushSlot { path: slot0 },
-        ],
-        "a reopened handle's first commit does not flush the newest slot before writing the other"
+        &[Call::WriteSlot { path: slot0.clone(), len }, Call::FlushSlot { path: slot0 }],
+        "a reopened handle's first commit is not slot 0's, written and flushed"
     );
+}
+
+/// A store whose newest slot `open` cannot flush is refused, by that flush,
+/// and opens once the flush succeeds: no handle exists over an image that
+/// may still be only in the cache, so `resign`, which signs without
+/// committing, never signs from one. The instrument lets the flush through
+/// and then reports it failed, which is the failure's shape from here.
+#[cfg(windows)]
+#[test]
+fn open_refuses_a_store_whose_newest_slot_it_cannot_flush() {
+    let dir = ScratchDir::new("open-flush");
+    let mut ks = keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    drop(ks);
+    let refused = keystore_harness::reopen_with("open flush", dir.path(), || {
+        let mut medium = Instrumented::new(Disk);
+        medium.stop_after(Some(1));
+        medium
+    })
+    .result
+    .err();
+    assert_eq!(
+        refused,
+        Some(Error::Io {
+            op: "flush_standing",
+            kind: std::io::ErrorKind::Interrupted
+        }),
+        "an open whose flush of the newest slot failed was not refused by that flush"
+    );
+    assert!(keystore_harness::open(dir.path()).is_ok(), "the store does not open once the flush succeeds");
 }
 
 /// **`create` flushes the store directory's parent, once, before its first

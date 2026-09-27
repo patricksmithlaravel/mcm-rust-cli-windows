@@ -564,12 +564,14 @@ as the four do on Unix: `write_slot` writes the frame into the target at
 offset 0 and sets the file's length to the frame's, and `flush_slot` is
 `FlushFileBuffers` on the target, which is what `std`'s `sync_all` calls on
 Windows, read in its Windows `fs` source. Then `Durable`. Two rules frame
-them. The target is never the slot holding the newest image. And a handle's
-first commit begins by flushing the newest slot as it found it, so that a
-slot is overwritten only while the other is known to be on the device: after
-a flush that failed, a later process can read a newer slot out of the cache
-although it never reached the disk, and overwriting the older slot then would
-leave a power cut nothing to go back to.
+them. The target is never the slot holding the newest image. And that slot
+is known to be on the device before anything else happens: `open` flushes
+the newest slot as it found it before the handle exists, and refuses the
+store if it cannot. After a flush that failed, a later process can read a
+newer slot out of the cache although it never reached the disk; overwriting
+the older slot then would leave a power cut nothing to go back to, and
+`resign`, which signs the reservation it finds and commits nothing, would
+sign from an image a power cut could still take back.
 
 **A crash at every step.** On this path a kill and a power cut differ in one
 respect: a power cut can also undo an unflushed write -- all of it, or any mix
@@ -579,7 +581,7 @@ creation. The other slot is not written, so it is not in play:
 | the crash comes | the target holds | `open` takes | allowed because |
 | --- | --- | --- | --- |
 | before `write_slot` | what it held | the newest: pre | nothing new was written |
-| once `write_slot` has begun, before `flush_slot` returns | the old image, the new, or a mix | the new image if the target is intact, else the newest: post or pre | no receipt exists for the new image, so taking it skips a position and never repeats one |
+| once `write_slot` has begun, before `flush_slot` returns | the old image, the new, or a mix | the new image if the target is intact, else the newest: post or pre | no receipt exists for the new image, and `open` flushes the image it takes before any command can sign from it, so taking it skips a position and never repeats one |
 | after `flush_slot` returns | the new image, on the device | the new image: post | the documented flush |
 | after `Durable` | the same | post | the next commit writes the other slot |
 

@@ -348,16 +348,11 @@ struct Slots {
     /// Slot 0 and slot 1, held for the handle's life and shared for reading
     /// alone (`perms::open_slot`); `None` for a slot file not there yet.
     held: [Option<File>; 2],
-    /// The slot holding the newest image, which no commit writes. `None` only
-    /// inside `create`, before its commit.
+    /// The slot holding the newest image, which no commit writes, and which
+    /// is on the device: `open` flushes it before the handle exists, and a
+    /// commit flushes what it writes before that becomes the newest. `None`
+    /// only inside `create`, before its commit.
     newest: Option<usize>,
-    /// Whether the newest slot is known to be on the device -- flushed by
-    /// this handle. False after `open`, so a handle's first commit flushes it
-    /// before writing the other: after a flush that failed, a later process
-    /// can read a newer slot out of the cache although it never reached the
-    /// disk, and overwriting the older slot then would leave a power cut
-    /// nothing to go back to.
-    on_device: bool,
     /// Whether slot 0 has yet to become a frame: it holds a store in the
     /// rename layout, or nothing yet. Until it is one, a build that reads
     /// only that layout would read it as the snapshot.
@@ -372,7 +367,6 @@ impl Slots {
         Slots {
             held: [None, None],
             newest: None,
-            on_device: true,
             vacate: true,
         }
     }
@@ -723,8 +717,12 @@ impl<M: Medium> Keystore<M> {
     /// Unix arm refuses a snapshot that grows while it is read; here the
     /// handles share read access alone, so nothing else can write a slot
     /// while it is read, or after, while the handle lives.
+    ///
+    /// **The image taken is on the device before the handle exists**, and a
+    /// store whose newest slot cannot be flushed is refused; the comment at
+    /// the flush says why.
     #[cfg(windows)]
-    pub fn open_with(dir: &Path, medium: M, unlock: &Unlock<'_>) -> Result<Self> {
+    pub fn open_with(dir: &Path, mut medium: M, unlock: &Unlock<'_>) -> Result<Self> {
         perms::refuse_unsafe_dir(dir)?;
         // The snapshot's name before the lock file is touched, the read under
         // the lock, a stale temp unlinked and never adopted: the Unix arm's
@@ -752,6 +750,26 @@ impl<M: Medium> Keystore<M> {
         };
         let taken = slots::take(&slot0, &slot1, unlock.password)?;
         let vacate = matches!(slot0, slots::Content::Other(_));
+        // **The image taken goes to the device before the handle exists.**
+        // `take` reads what the cache holds, and after a commit whose flush
+        // failed, or whose process ended between its write and its flush,
+        // that can be an image the device never received and no receipt was
+        // minted for. Taking it skips a position and repeats none only while
+        // nothing is signed from it that a power cut could take back, and
+        // `resign` signs the reservation it finds without committing, so no
+        // commit's flush comes first. The flush is here, where every command
+        // passes, rather than on the one path that signs without a commit,
+        // which a later such path would have to remember; and a failure
+        // refuses the open, since an image that cannot be made durable is
+        // not one to sign from. It is also what lets a commit overwrite the
+        // other slot at once: the newest is on the device before any write.
+        let newest = taken.newest;
+        let standing = if newest == 0 { Some(&held0) } else { held1.as_ref() };
+        let standing = standing.ok_or(Error::Io {
+            op: "flush_standing",
+            kind: std::io::ErrorKind::NotFound,
+        })?;
+        medium.flush_standing(dir, newest, standing)?;
         Ok(Keystore {
             dir: dir.to_path_buf(),
             _lock: lock,
@@ -771,8 +789,7 @@ impl<M: Medium> Keystore<M> {
             on_disk_version: taken.version,
             slots: Slots {
                 held: [Some(held0), held1],
-                newest: Some(taken.newest),
-                on_device: false,
+                newest: Some(newest),
                 vacate,
             },
         })
@@ -959,9 +976,11 @@ impl<M: Medium> Keystore<M> {
     /// not hold the newest one, and flushed.
     ///
     /// Three rules, each the crash argument's and not a convenience. The
-    /// newest slot is on the device before the other is written: a handle's
-    /// first commit flushes it as it found it (`Slots::on_device` says why).
-    /// The write is flushed before this returns, so before `Durable` exists.
+    /// newest slot is on the device before the other is written: `open`
+    /// flushed it before the handle existed, and its comment there says
+    /// why, and each commit flushes what it writes before that becomes the
+    /// newest. The write is flushed before this returns, so before
+    /// `Durable` exists.
     /// And a plain image in slot 0 is overwritten only once slot 1 holds a
     /// flushed frame, with the vacant frame, which is what makes a build that
     /// reads only the rename layout refuse the store from then on.
@@ -971,14 +990,6 @@ impl<M: Medium> Keystore<M> {
     /// existing means an image is on the device.
     #[cfg(windows)]
     fn write_slots(&mut self, dir: &Path, image: &[u8]) -> Result<()> {
-        if let (Some(newest), false) = (self.slots.newest, self.slots.on_device) {
-            let standing = self.slots.held[newest].as_ref().ok_or(Error::Io {
-                op: "flush_standing",
-                kind: std::io::ErrorKind::NotFound,
-            })?;
-            self.medium.flush_standing(dir, newest, standing)?;
-            self.slots.on_device = true;
-        }
         let target = if self.slots.newest == Some(1) { 0 } else { 1 };
         let framed = slots::frame(image)?;
         let written = self.medium.write_slot(dir, target, &mut self.slots.held[target], &framed)?;

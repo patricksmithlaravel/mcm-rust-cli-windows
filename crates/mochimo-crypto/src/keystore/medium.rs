@@ -54,10 +54,12 @@
 //! trait is a second one, under the same seal, whose steps are the layout's:
 //! `write_slot -> SlotWritten`, `flush_slot(SlotWritten) -> Flushed`, and
 //! `flush_standing`, which flushes a slot as it stands. The order is again
-//! crate-owned, in `Keystore::commit`: the slot holding the newest image is
-//! known to be on the device before the other is written, a write is flushed
-//! before `Durable` is minted, and a plain image in slot 0 is overwritten only
-//! once slot 1 holds a flushed frame.
+//! crate-owned, in `Keystore::open_with` and `Keystore::commit`: `open`
+//! flushes the slot holding the newest image before the handle exists, so
+//! it is on the device before the other is written and before anything is
+//! signed from it; a write is flushed before `Durable` is minted; and a
+//! plain image in slot 0 is overwritten only once slot 1 holds a flushed
+//! frame.
 //! `ui/fail/medium_slot_steps_are_not_reorderable.rs` pins that a flush takes
 //! a write's token and nothing else.
 //!
