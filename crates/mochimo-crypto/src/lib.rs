@@ -40,7 +40,7 @@
 //!
 //! | interface | Unix | Windows |
 //! | --- | --- | --- |
-//! | the keystore's permission model, a check against another local user rather than a convenience | mode bits: the store is created `0600` and its directory `0700`, and a directory that is group- or world-writable is refused | access lists: created with a protected list granting this user alone, and a directory anyone but this user, `SYSTEM` or the Administrators group can write to is refused |
+//! | the keystore's permission model, a check against another local user rather than a convenience | mode bits: the store is created `0600` and its directory `0700`, and a directory that is group- or world-writable is refused | access lists: created with a protected list granting this user alone, and a directory anyone but this user, `SYSTEM` or the Administrators group can write to is refused, as is a store file anyone but those three can read or write |
 //! | where the password and the recovery phrase are read, so that neither can be piped or redirected | `/dev/tty`, by path, with echo turned off by `stty` | the console's own buffers, `CONIN$` and `CONOUT$`, by name, with echo turned off in the console mode |
 //! | entropy | `/dev/urandom` | `BCryptGenRandom`, the system-preferred generator |
 //!

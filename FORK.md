@@ -215,7 +215,7 @@ sense with Windows in the tree, so Rep-0 would refuse it on its own terms.
 | --- | --- | --- |
 | `keystore/perms/windows.rs` | the Windows permission model, a new file, and the slot files' creation and opening under it, shared for reading alone | it is the Windows arm; a separate file so `perms.rs` stays the Unix arm and upstream edits to it merge without meeting Windows code |
 | `keystore/slots.rs` | the Windows layout's frame, and the rule by which `open` takes the newer of two slots -- a new file, compiled on Windows and under `cfg(test)` on every platform | the layout exists because Win32 documents no way to commit a rename, which is Windows' alone; a file of its own so the rule is tested on every board and none of it is Windows code in `medium.rs` or `keystore/mod.rs` |
-| `error.rs` | `UnsafeAcl` and `HeldOpen`, both `cfg(windows)` | the evidence a Windows refusal carries has no Unix shape, and `UnsafePermissions`' `mode` would have to be invented to carry it |
+| `error.rs` | `UnsafeAcl`, `UnsafeFileAcl` and `HeldOpen`, all `cfg(windows)` | the evidence a Windows refusal carries has no Unix shape, and `UnsafePermissions`' `mode` would have to be invented to carry it |
 | `crates/mochimo-crypto/Cargo.toml` | `windows-sys`, a `cfg(windows)` dependency | the declarations the two Windows arms call |
 | `README.md`, `docs/specification.md` | the platform statements, the slot layout, and the Windows limits an operator must know -- a store that is two files and moves one way, and a store another program holds refused at `open` | they describe a Windows build Rep-0 does not have |
 | `tests/invariants.rs` | two rows in `unsafe_is_confined_to_declared_files` -- the permission model, and the binary's console, held to its `cfg(windows)` `console` module -- and `from_raw_os_error` in the declared unresolved names | neither the Win32 security API nor the console mode has a `std` wrapper, so both are foreign calls or nothing |
@@ -398,7 +398,7 @@ keystore's lock section records the correction about `flock` above, with the
 one residue Microsoft documents: a lock can briefly outlive a terminated
 holder, which is met as `Locked`.
 
-### R1-2 -- the Windows permission model **(done, 2026-09-22; its tests green on a Windows runner, 2026-09-24)**
+### R1-2 -- the Windows permission model **(done, 2026-09-22; its tests green on a Windows runner, 2026-09-24; the store's files checked at `open` too, 2026-09-27)**
 
 A second arm in `keystore::perms`: a DACL check where the mode check is, and
 restricted creation where the mode-carrying creation is.
@@ -424,6 +424,32 @@ this. Of the twenty-four, these eighteen are what the Windows board goes
 through, and it has run them both as they stood before `5cfed2e` and as that
 commit narrowed them -- run 36073146927, at `7e45af7`, green. The console's
 six have not run at all.
+
+**The store's files, checked at `open`, 2026-09-27.** A review of this
+arm before the tag found the check stopping at the directory. Windows
+decides who may open a file by the file's own list -- Microsoft's *File
+Security and Access Rights* page says a parent directory's descriptor "is
+not used to control access to any child file or directory", and the
+traverse right that would make it matter is enforced only once the
+bypass-traverse privilege is taken from users, which the same page
+advises against. So a directory this arm made for the user alone could hold
+a slot file anyone may read or write: never one this arm creates, but a
+file moved in from elsewhere on the same volume keeps the list it had, and
+the slot layout rewrites its files in place, so nothing replaces it. A
+co-user could then read the ciphertext and try passwords offline, or tear
+the newest slot so that `open` steps back a generation without a word. The
+Unix arm has neither gap: its `0700` directory keeps other users from every
+file in it, and each commit renames a fresh `0600` file over the snapshot.
+So `open` reads each slot's list, and `take_lock` the lock's, through the
+handle the keystore holds, with `GetSecurityInfo`, and refuses a file
+whose owner or list lets anyone but the user, `SYSTEM` or Administrators
+read or write it, as a new `cfg(windows)` variant, `Error::UnsafeFileAcl`,
+naming the file. Reading counts for a file and not for the directory: the
+slot file is the ciphertext, and a co-user who can open the lock can hold
+it. The check adds one `unsafe` block here, the `GetSecurityInfo` call,
+argued at its site as the eighteen above were; it and its test,
+`open_refuses_a_store_file_another_user_can_read_or_write`, have not run on
+Windows.
 
 `windows-sys` is **already in `Cargo.lock`** (two versions, through the
 transport's graph), and `deny.toml` leaves `targets` unset deliberately so the

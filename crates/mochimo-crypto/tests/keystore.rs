@@ -1254,6 +1254,38 @@ fn open_refuses_a_directory_everyone_can_write_to() {
     assert!(Keystore::open(dir.path(), &keystore_harness::unlock()).is_ok(), "the directory does not open once the grant is gone");
 }
 
+/// Either slot file, or the lock, readable or writable by Everyone refuses
+/// the store's `open` by that file's name and naming Everyone, and the store
+/// opens once the entry is gone. The directory this build made grants this
+/// user alone, and the refusal comes anyway: Windows decides who may open a
+/// file by the file's own list, which is what `open` reads.
+#[cfg(windows)]
+#[test]
+fn open_refuses_a_store_file_another_user_can_read_or_write() {
+    let dir = ScratchDir::new("acl-file");
+    let mut ks = keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+    ks.add(imported_account()).unwrap_or_else(|e| panic!("{e}"));
+    drop(ks);
+    for name in ["accounts.mks", "accounts.mks.1", "keystore.lock"] {
+        let path = dir.path().join(name);
+        for grant in ["*S-1-1-0:(R)", "*S-1-1-0:(W)"] {
+            icacls(&path, &["/grant", grant]);
+            match keystore_harness::open(dir.path()).err() {
+                Some(Error::UnsafeFileAcl { file, trustee, .. }) => {
+                    assert_eq!(file, name, "{grant} on {name}: the refusal names the wrong file");
+                    assert_eq!(trustee, "S-1-1-0", "{grant} on {name}: the refusal names the wrong trustee");
+                }
+                other => panic!("{grant} on {name} was not refused as UnsafeFileAcl: {other:?}"),
+            }
+            icacls(&path, &["/remove:g", "*S-1-1-0"]);
+            assert!(
+                keystore_harness::open(dir.path()).is_ok(),
+                "the store does not open once {grant} on {name} is gone"
+            );
+        }
+    }
+}
+
 /// A store created inside a directory Everyone may modify inherits none of
 /// it: the keystore's protected list is what the directory gets, and the
 /// keystore's own check is what reads it back.

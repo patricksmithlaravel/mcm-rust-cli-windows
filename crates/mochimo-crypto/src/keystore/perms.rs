@@ -36,8 +36,9 @@
 //! here and nowhere above. The fourth, `create_private_file`, makes the temp
 //! the rename layout replaces the snapshot with, and a Windows store has no
 //! temp; in its place that arm has `create_slot` and `open_slot`, the slot
-//! layout's two files, which only the layout's Windows code calls. **There is
-//! no trait**, because
+//! layout's two files, and `refuse_unsafe_file`, which reads a store file's
+//! own list; only Windows code calls those three. **There is no trait**,
+//! because
 //! nothing ever chooses between the arms at run time -- a build has exactly
 //! one, and a trait would be an interface with one implementation per binary.
 //!
@@ -48,7 +49,11 @@
 //!
 //! What the arms share is the standard, not the mechanism: each makes a
 //! directory and files only its owner can reach, and each refuses a
-//! directory another local user can write to. How far the second arm is
+//! directory another local user can write to. The Windows arm also refuses
+//! a store file another local user can read or write, because there a
+//! file's own list, and not its directory's, decides who reaches it; on
+//! Unix a `0700` directory keeps other users from every file inside it.
+//! How far the second arm is
 //! established is stated at its head: its tests pass on a Windows runner, and
 //! what that runner is not -- an unelevated desktop with a scanner running --
 //! it does not establish.
@@ -79,7 +84,9 @@ use crate::error::{Error, Result};
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub(crate) use windows::{create_private_dir, create_slot, open_private_lock, open_slot, refuse_unsafe_dir};
+pub(crate) use windows::{
+    create_private_dir, create_slot, open_private_lock, open_slot, refuse_unsafe_dir, refuse_unsafe_file,
+};
 
 /// The mode every file this crate creates is created with: owner read and
 /// write, nothing for anyone else.

@@ -431,6 +431,11 @@ fn io(op: &'static str) -> impl Fn(std::io::Error) -> Error {
 
 fn take_lock(dir: &Path) -> Result<File> {
     let file = perms::open_private_lock(&dir.join(LOCK_NAME)).map_err(io("open lock"))?;
+    // A lock file anyone else can open is one they can hold, so on Windows
+    // its own list is checked before it is locked; `perms`' Windows arm has
+    // the argument, and Unix keeps its lock in the `0700` directory.
+    #[cfg(windows)]
+    perms::refuse_unsafe_file(&file, LOCK_NAME)?;
     match file.try_lock() {
         Ok(()) => Ok(file),
         Err(TryLockError::WouldBlock) => Err(Error::Locked),
@@ -738,6 +743,12 @@ impl<M: Medium> Keystore<M> {
         }
         let mut held0 = perms::open_slot(&path)?.ok_or(Error::Missing)?;
         let mut held1 = perms::open_slot(&dir.join(SLOT1_NAME))?;
+        // Each file's own list, before a byte of it is read: the directory's
+        // does not decide who reaches a file on Windows (`perms`' Windows arm).
+        perms::refuse_unsafe_file(&held0, SNAPSHOT_NAME)?;
+        if let Some(file) = held1.as_ref() {
+            perms::refuse_unsafe_file(file, SLOT1_NAME)?;
+        }
         let slot0 = slots::sort(Some(read_slot(&mut held0)?))?;
         // Slot 1 longer than any frame is torn rather than a refusal: it is
         // never read while slot 0 holds the store, and never allocated for.

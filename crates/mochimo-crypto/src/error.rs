@@ -152,6 +152,23 @@ pub enum Error {
         trustee: String,
         rights: u32,
     },
+    /// A store file -- `file`, a slot or the lock -- whose own access list
+    /// lets someone other than this user, `SYSTEM` or the Administrators
+    /// group read or write it, or which someone else owns.
+    ///
+    /// **A variant of its own, not [`Error::UnsafeAcl`] with a file in it.**
+    /// The evidence differs: a directory is refused for a write, a file for
+    /// a read as well, because a slot file is the ciphertext; and the
+    /// remedy differs, since a file moved into the store directory is what
+    /// carries a list of its own there. `trustee` and `rights` are as in
+    /// `UnsafeAcl`; `keystore::perms`'s Windows arm argues which rights count
+    /// and why a file's own list is checked at all.
+    #[cfg(windows)]
+    UnsafeFileAcl {
+        file: &'static str,
+        trustee: String,
+        rights: u32,
+    },
     /// Windows refused to open one of the store's two slot files, with the
     /// system error `code` -- `ERROR_SHARING_VIOLATION`, what a file another
     /// process holds without sharing write produces.
@@ -558,6 +575,16 @@ impl fmt::Display for Error {
                 "keystore directory lets {trustee} write to it (access mask {rights:#010x}), and \
                  {trustee} is neither this user, SYSTEM nor the Administrators group; refusing to \
                  hold key material there"
+            ),
+            #[cfg(windows)]
+            Error::UnsafeFileAcl { file, trustee, rights } => write!(
+                f,
+                "keystore file {file} lets {trustee} read or write it (access mask {rights:#010x}), \
+                 and {trustee} is neither this user, SYSTEM nor the Administrators group; refusing \
+                 to use it. On Windows a file's own access list decides who may open it, whatever \
+                 the directory's says, and a file moved or copied into the store directory can \
+                 bring or inherit one that admits others: give {file} a list granting this user \
+                 alone, and run the command again"
             ),
             #[cfg(windows)]
             Error::HeldOpen { code } => write!(

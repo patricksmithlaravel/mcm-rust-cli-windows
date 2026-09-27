@@ -13,6 +13,7 @@
 //! | directory created `0700` | directory created with a protected access list granting this user full control and nobody else anything, inherited by what is created inside it |
 //! | file created `0600` | file created with a protected access list granting this user full control and nobody else anything |
 //! | refuse group- or other-write | refuse an access list that lets anyone but this user, `SYSTEM` or the Administrators group write, and refuse a directory owned by anyone else |
+//! | a `0700` directory keeps other users from every file inside it, and each commit renames a fresh `0600` file over the snapshot | refuse a slot file or the lock whose own list lets anyone but those three read or write it, or which anyone else owns, because a file's own list decides who reaches it |
 //!
 //! **The descriptor is given to `CreateFileW` and `CreateDirectoryW`, not set
 //! afterwards.** Access is checked when a handle is opened, so a file created
@@ -64,9 +65,10 @@
 //! directly. `FILE_WRITE_ATTRIBUTES` and `FILE_WRITE_EA` are left out: they
 //! change the directory's own attributes and not what it names.
 //!
-//! Entries that apply only to children are skipped, because this module gives
-//! every file it creates its own protected list and nothing inherits from the
-//! directory. Denying entries are skipped too, which makes the check stricter
+//! Entries that apply only to children are skipped, on the directory because
+//! a child's access is its own list's, which [`refuse_unsafe_file`] reads for
+//! every store file, and on a file because an entry for children applies to
+//! nothing a file has. Denying entries are skipped too, which makes the check stricter
 //! than the effective access it approximates: a grant followed by a denial of
 //! the same right is refused here although Windows would not honour it. That
 //! is the fail-closed direction, and computing effective access properly is
@@ -108,6 +110,9 @@
 //! an unelevated desktop gives a directory. A null list, an entry type the
 //! check refuses as unread, and a denying entry were not met at all. What this
 //! file says of those rests on Microsoft's documentation and `std`'s source.
+//! [`refuse_unsafe_file`] and the test of it,
+//! `open_refuses_a_store_file_another_user_can_read_or_write`, have not run on
+//! Windows.
 
 use std::ffi::c_void;
 use std::fs::{self, File};
@@ -125,7 +130,7 @@ use windows_sys::Win32::Foundation::{
 };
 use windows_sys::Win32::Security::Authorization::{
     ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW, GetNamedSecurityInfoW,
-    SDDL_REVISION_1, SE_FILE_OBJECT,
+    GetSecurityInfo, SDDL_REVISION_1, SE_FILE_OBJECT,
 };
 use windows_sys::Win32::Security::{
     GetAce, GetTokenInformation, TokenUser, ACCESS_ALLOWED_ACE, ACE_HEADER, ACL, DACL_SECURITY_INFORMATION,
@@ -134,8 +139,9 @@ use windows_sys::Win32::Security::{
 };
 use windows_sys::Win32::Storage::FileSystem::{
     CreateDirectoryW, CreateFileW, CREATE_NEW, DELETE, FILE_ADD_FILE, FILE_ADD_SUBDIRECTORY,
-    FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD, FILE_FLAG_OPEN_REPARSE_POINT, FILE_SHARE_DELETE,
-    FILE_SHARE_READ, FILE_SHARE_WRITE, OPEN_ALWAYS, READ_CONTROL, WRITE_DAC, WRITE_OWNER,
+    FILE_APPEND_DATA, FILE_ATTRIBUTE_NORMAL, FILE_DELETE_CHILD, FILE_FLAG_OPEN_REPARSE_POINT,
+    FILE_READ_DATA, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_WRITE_DATA, OPEN_ALWAYS,
+    READ_CONTROL, WRITE_DAC, WRITE_OWNER,
 };
 use windows_sys::Win32::System::SystemServices::{
     ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
@@ -161,6 +167,21 @@ const WRITE_RIGHTS: u32 = FILE_ADD_FILE
     | DELETE
     | WRITE_DAC
     | WRITE_OWNER
+    | GENERIC_WRITE
+    | GENERIC_ALL;
+
+/// The rights on a store file whose grant to anyone else is a refusal:
+/// reading its data, and the rights [`WRITE_RIGHTS`] names as a file has
+/// them -- writing and appending where the directory adds a file or a
+/// subdirectory, and no counterpart to deleting a child. See
+/// [`refuse_unsafe_file`] for why reading counts here and not there.
+const FILE_RIGHTS: u32 = FILE_READ_DATA
+    | FILE_WRITE_DATA
+    | FILE_APPEND_DATA
+    | DELETE
+    | WRITE_DAC
+    | WRITE_OWNER
+    | GENERIC_READ
     | GENERIC_WRITE
     | GENERIC_ALL;
 
@@ -202,7 +223,7 @@ pub(crate) fn refuse_unsafe_dir(dir: &Path) -> Result<()> {
     // exFAT -- reports a null list and may report no owner, and the refusal
     // an operator can act on is "anyone can write here", not a failure to
     // read an owner that volume does not keep.
-    match security.foreign_writer(&user) {
+    match security.foreign_grant(&user, WRITE_RIGHTS) {
         Ok(None) => {}
         Ok(Some((trustee, rights))) => return Err(Error::UnsafeAcl { trustee, rights }),
         Err(e) => {
@@ -218,6 +239,71 @@ pub(crate) fn refuse_unsafe_dir(dir: &Path) -> Result<()> {
     })?;
     if !accepted(&owner, &user) {
         return Err(Error::UnsafeAcl {
+            trustee: owner,
+            rights: WRITE_DAC | READ_CONTROL,
+        });
+    }
+    Ok(())
+}
+
+/// Refuse a store file another local user could read or write: a slot, or
+/// the lock.
+///
+/// **The directory's list does not reach its files.** Windows decides who
+/// may open a file by the file's own list: Microsoft's *File Security and
+/// Access Rights* page says that "the security descriptor of a parent
+/// directory is not used to control access to any child file or
+/// directory", and the right that would make the directory matter,
+/// `FILE_TRAVERSE`, is enforced only once the bypass-traverse privilege is
+/// taken from users, which the same page advises against. So a store
+/// directory this user alone can open can still hold a file anyone may
+/// read. This module never makes one, but a file moved in from elsewhere
+/// on the same volume keeps the list it had, and the slot layout rewrites
+/// its files in place, so nothing ever replaces that list. The Unix arm
+/// has neither gap: a `0700` directory stops other users reaching a file
+/// inside it, and each commit renames a fresh `0600` file over the snapshot.
+///
+/// **Reading counts here, and not on the directory.** A slot file is the
+/// ciphertext, and a co-user who can read it can try passwords against it
+/// offline; the lock holds nothing, but a co-user who can open it can hold
+/// the lock. So the rights refused are [`FILE_RIGHTS`]. The owner is
+/// refused as on the directory, since an owner may rewrite the list.
+///
+/// **Through the handle the keystore holds**, with `GetSecurityInfo`, not by
+/// path: the list checked is the one of the file then read and written,
+/// and nothing at the path can put another file's list in front of it.
+pub(crate) fn refuse_unsafe_file(file: &File, name: &'static str) -> Result<()> {
+    let user = current_user().map_err(|e| Error::Io {
+        op: "read the process token",
+        kind: e.kind(),
+    })?;
+    let security = Security::of_file(file).map_err(|e| Error::Io {
+        op: "read a store file's access list",
+        kind: e.kind(),
+    })?;
+    match security.foreign_grant(&user, FILE_RIGHTS) {
+        Ok(None) => {}
+        Ok(Some((trustee, rights))) => {
+            return Err(Error::UnsafeFileAcl {
+                file: name,
+                trustee,
+                rights,
+            })
+        }
+        Err(e) => {
+            return Err(Error::Io {
+                op: "read a store file's access list",
+                kind: e.kind(),
+            })
+        }
+    }
+    let owner = sid_string(security.owner).map_err(|e| Error::Io {
+        op: "read a store file's owner",
+        kind: e.kind(),
+    })?;
+    if !accepted(&owner, &user) {
+        return Err(Error::UnsafeFileAcl {
+            file: name,
             trustee: owner,
             rights: WRITE_DAC | READ_CONTROL,
         });
@@ -270,7 +356,8 @@ pub(crate) fn create_slot(path: &Path) -> io::Result<File> {
 /// scanner, an indexer, a backup or sync agent -- makes the open fail with
 /// `ERROR_SHARING_VIOLATION`, and that is `Error::HeldOpen`, met at `open`,
 /// before anything is read or reserved. Every other failure is `Io`. The list
-/// the file already has is left as it is, as the Unix arm leaves a mode.
+/// the file already has is not changed here; `open` checks it through the
+/// handle this returns, with [`refuse_unsafe_file`].
 pub(crate) fn open_slot(path: &Path) -> Result<Option<File>> {
     match fs::OpenOptions::new()
         .read(true)
@@ -414,7 +501,8 @@ fn current_user() -> io::Result<String> {
     sid_string(user.User.Sid)
 }
 
-/// A directory's owner and access list, and the descriptor that holds both.
+/// A directory's or a file's owner and access list, and the descriptor that
+/// holds both.
 struct Security {
     owner: PSID,
     dacl: *const ACL,
@@ -458,9 +546,43 @@ impl Security {
         })
     }
 
-    /// The first entry granting a write right to a trustee [`accepted`] does
-    /// not name, as that trustee and the rights the entry grants.
-    fn foreign_writer(&self, user: &str) -> io::Result<Option<(String, u32)>> {
+    /// The same, for the file an open handle is, read with `GetSecurityInfo`.
+    fn of_file(file: &File) -> io::Result<Security> {
+        let mut owner: PSID = ptr::null_mut();
+        let mut dacl: *mut ACL = ptr::null_mut();
+        let mut descriptor: PSECURITY_DESCRIPTOR = ptr::null_mut();
+        // SAFETY: the handle is the one `file` owns, open for the whole call,
+        // and was opened with `GENERIC_READ`, which includes the
+        // `READ_CONTROL` the function needs to read an owner and a list; the
+        // group and SACL outputs are null, which the function accepts when
+        // their information is not requested; the descriptor it returns is
+        // `LocalAlloc`ed and owned here, and `owner` and `dacl` point into it.
+        let rc = unsafe {
+            GetSecurityInfo(
+                std::os::windows::io::AsRawHandle::as_raw_handle(file),
+                SE_FILE_OBJECT,
+                OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+                &mut owner,
+                ptr::null_mut(),
+                &mut dacl,
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        // Owned only once the call has succeeded, as in `Security::of`.
+        if rc != ERROR_SUCCESS {
+            return Err(io::Error::from_raw_os_error(rc as i32));
+        }
+        Ok(Security {
+            owner,
+            dacl,
+            _descriptor: Local(descriptor),
+        })
+    }
+
+    /// The first entry granting any of `rights` to a trustee [`accepted`]
+    /// does not name, as that trustee and the rights the entry grants.
+    fn foreign_grant(&self, user: &str, rights: u32) -> io::Result<Option<(String, u32)>> {
         if self.dacl.is_null() {
             return Ok(Some((EVERYONE.to_string(), GENERIC_ALL)));
         }
@@ -486,7 +608,7 @@ impl Security {
                 // the callback type's application data follows the SID and
                 // is not read.
                 let allowed = unsafe { &*ace.cast::<ACCESS_ALLOWED_ACE>() };
-                if allowed.Mask & WRITE_RIGHTS == 0 {
+                if allowed.Mask & rights == 0 {
                     continue;
                 }
                 // The SID starts at `SidStart` and runs past the end of the
