@@ -398,7 +398,7 @@ keystore's lock section records the correction about `flock` above, with the
 one residue Microsoft documents: a lock can briefly outlive a terminated
 holder, which is met as `Locked`.
 
-### R1-2 -- the Windows permission model **(done, 2026-09-22; its tests green on a Windows runner, 2026-09-24; the store's files checked at `open` too, 2026-09-27)**
+### R1-2 -- the Windows permission model **(done, 2026-09-22; its tests green on a Windows runner, 2026-09-24; the store's files checked at `open` too, and run green on a Windows runner, 2026-09-27)**
 
 A second arm in `keystore::perms`: a DACL check where the mode check is, and
 restricted creation where the mode-carrying creation is.
@@ -447,9 +447,11 @@ read or write it, as a new `cfg(windows)` variant, `Error::UnsafeFileAcl`,
 naming the file. Reading counts for a file and not for the directory: the
 slot file is the ciphertext, and a co-user who can open the lock can hold
 it. The check adds one `unsafe` block here, the `GetSecurityInfo` call,
-argued at its site as the eighteen above were; it and its test,
-`open_refuses_a_store_file_another_user_can_read_or_write`, have not run on
-Windows.
+argued at its site as the eighteen above were. Its test,
+`open_refuses_a_store_file_another_user_can_read_or_write`, passed on a
+Windows runner in workflow run 36297667697, at `340e5f3`: Everyone granted
+read, then write, on either slot or the lock was refused by that file's
+name, and the store opened once the grant was gone.
 
 `windows-sys` is **already in `Cargo.lock`** (two versions, through the
 transport's graph), and `deny.toml` leaves `targets` unset deliberately so the
@@ -1189,6 +1191,14 @@ before it:
 - The slot walk's frame longer than any this build writes held each Miri
   run for hours in a 12.8 MB wipe; that case is a test of its own, kept off
   Miri (`c7af912`).
+
+The Windows tests those fixes brought -- the refusal of a store whose
+newest slot `open` cannot flush, the store files' lists, and the two walks
+-- passed on a Windows runner in workflow run 36297667697, at `340e5f3`,
+all six jobs green at the first attempt: 403 passed on Linux and on macOS
+and 388 on Windows, `keystore` 37 there, each summed from its job's
+seventeen result lines, on `ubuntu24` 20260920.314.1, `macos26`
+20260907.0351.1 and `win25-vs2026` 20260922.246.2.
 - Three statements were untrue and are corrected in the commit that records
   this: the permission module had the order of a grant and a denial
   backwards; R1-5 read `echo hello` showing in PowerShell as the console's

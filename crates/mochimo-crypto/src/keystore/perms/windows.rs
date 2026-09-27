@@ -99,11 +99,15 @@
 //! Server 2025, build 26100 -- where every store the tests open is checked by
 //! this file, the keystore makes its lock through it, and the slot layout
 //! makes and opens every store file through `create_slot` and `open_slot`.
-//! The three `cfg(windows)` tests in `tests/keystore.rs` pass there:
+//! The four tests in `tests/keystore.rs` aimed at this file pass there:
 //! `open_refuses_a_directory_everyone_can_write_to`,
-//! `a_store_created_under_a_writable_parent_inherits_nothing_from_it`, and
+//! `a_store_created_under_a_writable_parent_inherits_nothing_from_it`,
 //! `a_slot_held_open_without_write_sharing_refuses_the_open_by_name`, which
-//! measures the refusal `open_slot` makes. `FORK.md` records the runs.
+//! measures the refusal `open_slot` makes, and
+//! `open_refuses_a_store_file_another_user_can_read_or_write`, which measures
+//! [`refuse_unsafe_file`]'s: Everyone granted read, then write, on either
+//! slot or the lock is refused by that file's name. `FORK.md` records the
+//! runs.
 //!
 //! **Not established:** the runner's account is an elevated administrator,
 //! and a directory it creates is owned by the Administrators group, so the
@@ -111,9 +115,6 @@
 //! an unelevated desktop gives a directory. A null list, an entry type the
 //! check refuses as unread, and a denying entry were not met at all. What this
 //! file says of those rests on Microsoft's documentation and `std`'s source.
-//! [`refuse_unsafe_file`] and the test of it,
-//! `open_refuses_a_store_file_another_user_can_read_or_write`, have not run on
-//! Windows.
 
 use std::ffi::c_void;
 use std::fs::{self, File};
