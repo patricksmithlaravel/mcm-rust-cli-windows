@@ -947,7 +947,7 @@ held a store open, and whether a scanner was running is not known. It is
 one run on one machine, returned as text, and nothing in the tree repeats
 it.
 
-### R1-6 -- the board **(done, 2026-09-22; green on all three platforms, 2026-09-24; its Windows `verify` assembled from parts, 2026-09-25)**
+### R1-6 -- the board **(done, 2026-09-22; green on all three platforms, 2026-09-24; its Windows `verify` assembled from parts, 2026-09-25; all three rows green for 1.1.0, 2026-09-27)**
 
 `./board` is a POSIX shell script. `RELEASE.md` asks for green on two platforms
 at one commit; it becomes three.
@@ -981,8 +981,10 @@ file is now Rep-0's with Windows added, and its head says so. Rep-0's runs
 of its copy came down in `RELEASE.md`, under a heading of their own; this
 tree's stay here.
 
-**Nine runs, 2026-09-24 and 25.** Each figure is summed from that job's own
-seventeen result lines, read with `gh run view <run> --job <job> --log`:
+**Fourteen runs, 2026-09-24 to 27**, twelve of them below: the eleventh and
+twelfth ran the pseudoconsole harness on its own branch, and are recorded
+with it. Each figure is summed from that job's own seventeen result lines,
+read with `gh run view <run> --job <job> --log`:
 
 | run | commit | Linux | macOS | Windows |
 | --- | --- | --- | --- | --- |
@@ -995,10 +997,14 @@ seventeen result lines, read with `gh run view <run> --job <job> --log`:
 | 36106141274 | `cb933ce` | green, 400 passed | seven rows green; `test` red, 399 passed and 1 failed; re-run green, 400 passed | green, 382 passed |
 | 36188984261 | `e451bde` | green, 400 passed | green, 400 passed | green, 382 passed |
 | 36203309483 | `ab74b8a` | green, 402 passed | green, 402 passed | green, 383 passed |
+| 36270814961 | `3490102` | green, 402 passed | green, 402 passed | green, 383 passed |
+| 36297667697 | `340e5f3` | green, 403 passed | green, 403 passed | green, 388 passed |
+| 36298674909 | `06b38b0` | green, 403 passed | green, 403 passed | green, 388 passed |
 
 Nothing was ignored on any platform. Windows runs eighteen fewer through
-the eighth run -- the `pty::` tests its gate removes -- and nineteen in the
-ninth, whose `create` parent-flush test is `cfg(unix)`. The third run is of the tree after Rep-0's
+the eighth run -- the `pty::` tests its gate removes -- nineteen in the
+ninth and the tenth, whose `create` parent-flush test is `cfg(unix)`, and
+fifteen from the thirteenth, whose `keystore` has four tests of Windows' own. The third run is of the tree after Rep-0's
 `0c12e38` came down, so its Linux and macOS `pty::` tests drive the binary's
 reads through `read_scrubbed_line`, and it is the first run of the workflow's
 `msrv` job: on 1.89.0, read from the manifest's `"1.89"`, both of
@@ -1027,7 +1033,18 @@ for 402; Windows gains the unit test alone, for 383, and passed it natively
 as well as `medium_sequence_is_exactly_the_slot_steps_with_their_arguments`,
 whose `create` now records the parent named first -- so the Windows no-op
 and its record have run there. `cli` is 111 against Windows' 93 and
-`keystore` 34 against 33, read from each job's result lines.
+`keystore` 34 against 33, read from each job's result lines. The tenth
+runs Rep-0's 1.1.0, merged down in `1b4b3f3`, at `3490102`, green in all
+six jobs at the first attempt; it was to be the release's run until the
+review before the tag held it. The thirteenth runs that review's fixes, at
+`340e5f3`, and the fourteenth their record, at `06b38b0`, the commit this
+tree's 1.1.0 verifies: both green in all six jobs at the first attempt, 403
+passed on Linux and macOS and 388 on Windows, where `cli` is 93 and
+`keystore` 37. The fourteenth's Linux and Windows board jobs, 108562140195
+and 108562140192, are the `check` parts of `RELEASE.md`'s `linux` and
+`windows` rows there, the Windows one passing the slot layout's I3 and I2
+proofs and the review's four Windows tests, and its `msrv` jobs are the MSRV
+box's evidence on all three, beside the same pair run on this macOS host.
 
 The seventh's one red was on macOS, in
 `pty::submit_on_a_real_pty_ships_a_saved_artifact_and_opens_no_store`, and
@@ -1063,7 +1080,8 @@ each of the third and fourth runs the Windows board job had `win25-vs2026`
 20260907.229.1 while the Windows `msrv` job had 20260922.246.2, where in the
 fifth both had 20260907.229.1, in the sixth both had 20260922.246.2, in
 the seventh the board job had 20260907.229.1 and the `msrv` job
-20260922.246.2 again, and in the eighth and the ninth both had
+20260922.246.2 again, and in the eighth, the ninth, the tenth, the
+thirteenth and the fourteenth both had
 20260922.246.2 -- the `-latest` trade the workflow's head makes, recorded by
 the runs themselves.
 
@@ -1122,8 +1140,8 @@ place of `--no-run` names the same sixty tests, counted by their `: test`
 lines, as it does for `aarch64-apple-darwin` -- forty-one of them the
 library's, the slot layout's seven among those -- and `--test txwire`
 passed its three for both targets, in about forty seconds each. The whole
-run for the target has not been made; when it is, it belongs in a row of
-`RELEASE.md`'s record at a tagged commit.
+run for the target was made for 1.1.0, at `06b38b0`, from this host:
+61 passed, 0 failed, 0 ignored, in 6 h 18 m 13 s, the third part of `RELEASE.md`'s `windows` row there.
 
 What those sixty reach is narrower than the name of the part. None of the
 port's `unsafe` is under them: every test that reaches `perms/windows.rs`
@@ -1171,12 +1189,13 @@ planted in `cli/address.rs` fails it and the failure names the file.
 
 ### Reviewed before the tag **(2026-09-27)**
 
-Before 1.1.0 was tagged at `3490102`, three read-only reviews read the
-Windows code this fork adds against its design and Microsoft's
+1.1.0 was to verify `3490102`. Before its tag, three read-only reviews read
+the Windows code this fork adds against its design and Microsoft's
 documentation: the slot layout's write path, the permission model, and the
 binary's console. The user held the tag and stopped the release's long runs
 for the findings that bear on what the release claims, and each was fixed
-before it:
+before it, so 1.1.0 verifies `06b38b0` and its tag names that commit's
+child, `810ff87`:
 
 - `resign` could sign from an image `open` had read out of the cache after
   a commit whose flush failed or whose process ended before it, and a power
