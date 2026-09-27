@@ -96,8 +96,9 @@ which is the one tagged. *Two commits and a tag*, below, says why it is two.
       **The figures are per platform**: on Windows the `cli` target has
       eighteen fewer tests, because the `pty::` module is Unix-only, and
       `keystore` runs three access-list tests in place of three mode-bit
-      tests and one fewer in all, `create`'s parent-flush test being Unix's
-      alone. AGENT.md's figures are for the platform its board section names.
+      tests and three more in all: `create`'s parent-flush test is Unix's
+      alone, and four tests are Windows' own. AGENT.md's figures are for the
+      platform its board section names.
 - [ ] `AGENT.md`'s board section names the commit verified, by its hash.
 - [ ] **The commit tagged is the commit verified's child, and changes only
       the two documents that record it.** `git diff --stat <verified>
@@ -370,6 +371,9 @@ red, the row says red and a later row says green.
 | --- | --- | --- | --- | --- | --- | --- |
 | 2026-09-26 | `da9ed86` | macos | macOS 26.6.2 (25G83), Darwin 25.6.0 arm64 | 1.98.0 (88d9e12ae 2026-08-18); nightly 1.100.0 (fd7ed57df 2026-08-29) | green, run whole on this repository's macOS host: check 395 passed, 0 failed, 0 ignored; `cargo deny check` advisories, bans, licenses and sources ok; Miri 54 passed, 0 failed, 0 ignored, in 14 h 04 m 25 s beside the `linux` row's; 14 h 09 m 15 s in all | patricksmithlaravel |
 | 2026-09-26 | `da9ed86` | linux | Linux 6.17.0-1022-azure x86_64, `ubuntu24` 20260920.314.1 | 1.98.0 on the runner; nightly 1.100.0 (fd7ed57df 2026-08-29) on the macOS host | green, assembled: `./board check` in workflow run 36216653269, job 108333823905, 395 passed, 0 failed, 0 ignored; `cargo deny check` on the macOS host, the `macos` row's run; Miri for `x86_64-unknown-linux-gnu` on the macOS host, MIRIFLAGS unset, 54 passed, 0 failed, 0 ignored, in 14 h 04 m 24 s beside the `macos` row's | patricksmithlaravel |
+| 2026-09-27 | `06b38b0` | macos | macOS 26.6.2 (25G83), Darwin 25.6.0 arm64 | 1.98.0 (88d9e12ae 2026-08-18); nightly 1.100.0 (fd7ed57df 2026-08-29) | green, run whole on this repository's macOS host: check 403 passed, 0 failed, 0 ignored; `cargo deny check` advisories, bans, licenses and sources ok; Miri 61 passed, 0 failed, 0 ignored, in 6 h 18 m 58 s beside the `linux` and `windows` rows'; 6 h 24 m 53 s in all | patricksmithlaravel |
+| 2026-09-27 | `06b38b0` | linux | Linux 6.17.0-1022-azure x86_64, `ubuntu24` 20260920.314.1 | 1.98.0 on the runner; nightly 1.100.0 (fd7ed57df 2026-08-29) on the macOS host | green, assembled: `./board check` in workflow run 36298674909, job 108562140195, 403 passed, 0 failed, 0 ignored; `cargo deny check` on the macOS host, the `macos` row's run; Miri for `x86_64-unknown-linux-gnu` on the macOS host, MIRIFLAGS unset, 61 passed, 0 failed, 0 ignored, in 6 h 18 m 55 s beside the `macos` and `windows` rows' | patricksmithlaravel |
+| 2026-09-27 | `06b38b0` | windows | Windows 10.0.26100 x86_64, `win25-vs2026` 20260922.246.2 | 1.98.0 on the runner; nightly 1.100.0 (fd7ed57df 2026-08-29) on the macOS host | green, assembled: `./board check` in workflow run 36298674909, job 108562140192, 388 passed, 0 failed, 0 ignored, the power-loss gate's I3 and I2 proofs among them; `cargo deny check` on the macOS host, the `macos` row's run; Miri for `x86_64-pc-windows-msvc` on the macOS host, MIRIFLAGS unset, 61 passed, 0 failed, 0 ignored, in 6 h 18 m 13 s beside the `macos` and `linux` rows' | patricksmithlaravel |
 
 `platform` is `linux`, `macos` or `windows`. `toolchain` is the stable version the board
 ran on and the nightly Miri ran on, since the `compile_fail` target pins
