@@ -300,7 +300,7 @@ pub struct Session {
     process: OwnedHandle,
     console: Option<Pseudoconsole>,
     input: Option<PipeWriter>,
-    rx: Receiver<Vec<u8>>,
+    rx: Receiver<(Instant, Vec<u8>)>,
     reader: Option<JoinHandle<()>>,
     output: Vec<u8>,
     cursor: usize,
@@ -308,6 +308,10 @@ pub struct Session {
     stderr_file: PathBuf,
     prompts: usize,
     started: Instant,
+    /// What happened when, for the report a failure prints: each chunk the
+    /// console sent, each prompt seen, and each thing typed, counted rather
+    /// than shown.
+    timeline: Vec<(Instant, String)>,
 }
 
 impl Session {
@@ -326,6 +330,7 @@ impl Session {
         let (output, console_output) =
             std::io::pipe().unwrap_or_else(|e| panic!("cannot create the console's output pipe: {e}"));
 
+        let began = Instant::now();
         let mut raw: HPCON = 0;
         // SAFETY: both handles are open ends of pipes this function owns, the
         // one the console reads and the one it writes, and `raw` is a valid
@@ -375,6 +380,7 @@ impl Session {
         // each is taken into ownership exactly once.
         let (process, thread) =
             unsafe { (OwnedHandle::from_raw_handle(started.hProcess), OwnedHandle::from_raw_handle(started.hThread)) };
+        let launched = Instant::now();
         drop(thread);
         drop(list);
         drop(console_input);
@@ -388,7 +394,7 @@ impl Session {
                 match output.read(&mut chunk) {
                     Ok(0) | Err(_) => break,
                     Ok(n) => {
-                        if tx.send(chunk[..n].to_vec()).is_err() {
+                        if tx.send((Instant::now(), chunk[..n].to_vec())).is_err() {
                             break;
                         }
                     }
@@ -407,8 +413,15 @@ impl Session {
             stdout_file,
             stderr_file,
             prompts: 0,
-            started: Instant::now(),
+            started: began,
+            timeline: vec![(launched, "cmd.exe started in the console".to_owned())],
         }
+    }
+
+    /// Take one chunk of the console's output, noting when it arrived.
+    fn take(&mut self, (at, chunk): (Instant, Vec<u8>)) {
+        self.timeline.push((at, format!("the console sent {} byte(s)", chunk.len())));
+        self.output.extend_from_slice(&chunk);
     }
 
     /// Wait until the console shows `needle` past what earlier calls
@@ -423,6 +436,7 @@ impl Session {
             if let Some(at) = screen[self.cursor..].find(needle) {
                 let before = screen[self.cursor..self.cursor + at].to_owned();
                 self.cursor += at + needle.len();
+                self.timeline.push((Instant::now(), format!("saw {needle:?}")));
                 return before;
             }
             let left = deadline.saturating_duration_since(Instant::now());
@@ -432,7 +446,7 @@ impl Session {
                 panic!("the console did not show {needle:?} within {STEP:?}, so the session was ended.\n{d}");
             }
             match self.rx.recv_timeout(left) {
-                Ok(chunk) => self.output.extend_from_slice(&chunk),
+                Ok(item) => self.take(item),
                 Err(RecvTimeoutError::Timeout) => {}
                 Err(RecvTimeoutError::Disconnected) => {
                     let d = self.diagnostics();
@@ -457,6 +471,14 @@ impl Session {
             .write_all(keys)
             .and_then(|()| input.flush())
             .unwrap_or_else(|e| panic!("cannot type at the console: {e}"));
+        let what = if keys == ENTER {
+            "Enter".to_owned()
+        } else if keys == CTRL_Z {
+            "Ctrl-Z".to_owned()
+        } else {
+            format!("{} character(s)", String::from_utf8_lossy(keys).chars().count())
+        };
+        self.timeline.push((Instant::now(), format!("typed {what}")));
     }
 
     /// Type `line` and press Enter.
@@ -471,6 +493,7 @@ impl Session {
         // SAFETY: `process` is an open process handle this session owns.
         let waited = unsafe { WaitForSingleObject(self.process.as_raw_handle(), millis(STEP)) };
         if waited != WAIT_OBJECT_0 {
+            self.timeline.push((Instant::now(), format!("waited {STEP:?} for the program to exit")));
             let d = self.diagnostics();
             panic!(
                 "THE PROGRAM DID NOT EXIT within {STEP:?} of its last step (wait result {waited}), so the \
@@ -481,6 +504,7 @@ impl Session {
         // SAFETY: as above, and `code` is a valid place for the result.
         let ok = unsafe { GetExitCodeProcess(self.process.as_raw_handle(), &mut code) };
         assert!(ok != 0, "GetExitCodeProcess failed: {}", io::Error::last_os_error());
+        self.timeline.push((Instant::now(), format!("the program had exited, {code}")));
 
         // The rest of the output arrives as the console closes: a last
         // rendering, and then its end of the output pipe goes and the reader
@@ -490,7 +514,7 @@ impl Session {
         let deadline = Instant::now() + Duration::from_secs(30);
         loop {
             match self.rx.recv_timeout(deadline.saturating_duration_since(Instant::now())) {
-                Ok(chunk) => self.output.extend_from_slice(&chunk),
+                Ok(item) => self.take(item),
                 Err(RecvTimeoutError::Disconnected) => break,
                 Err(RecvTimeoutError::Timeout) => {
                     let d = self.diagnostics();
@@ -525,12 +549,18 @@ impl Session {
     }
 
     fn diagnostics(&mut self) -> String {
-        while let Ok(chunk) = self.rx.try_recv() {
-            self.output.extend_from_slice(&chunk);
+        while let Ok(item) = self.rx.try_recv() {
+            self.take(item);
         }
+        let mut timeline = self.timeline.clone();
+        timeline.sort_by_key(|(at, _)| *at);
+        let timeline: String = timeline
+            .iter()
+            .map(|(at, what)| format!("{:>9.3} s  {what}\n", at.saturating_duration_since(self.started).as_secs_f64()))
+            .collect();
         format!(
-            "--- after {:?} ---\n--- screen ---\n{}\n--- the console's bytes, escaped ---\n{}\n--- stdout \
-             file ---\n{}\n--- stderr file ---\n{}",
+            "--- after {:?} ---\n--- timeline, from the console's creation ---\n{timeline}--- screen ---\n{}\n--- the \
+             console's bytes, escaped ---\n{}\n--- stdout file ---\n{}\n--- stderr file ---\n{}",
             self.started.elapsed(),
             visible(&self.output),
             String::from_utf8_lossy(&self.output).escape_debug(),
