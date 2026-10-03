@@ -5,14 +5,15 @@
 //! # The same two standards, in access-control lists
 //!
 //! The Unix arm makes one thing and accepts another: it creates at `0700` and
-//! `0600`, and it refuses a directory another local user can write to. This
-//! arm keeps both standards and changes only what they are written in.
+//! `0600`, and it refuses a directory another local user owns or can write
+//! to. This arm keeps both standards and changes only what they are written
+//! in.
 //!
 //! | Unix arm | this arm |
 //! | --- | --- |
 //! | directory created `0700` | directory created with a protected access list granting this user full control and nobody else anything, inherited by what is created inside it |
 //! | file created `0600` | file created with a protected access list granting this user full control and nobody else anything |
-//! | refuse group- or other-write | refuse an access list that lets anyone but this user, `SYSTEM` or the Administrators group write, and refuse a directory owned by anyone else |
+//! | refuse group- or other-write, and a directory owned by another user | refuse an access list that lets anyone but this user, `SYSTEM` or the Administrators group write, and refuse a directory owned by anyone else |
 //! | a `0700` directory keeps other users from every file inside it, and each commit renames a fresh `0600` file over the snapshot | refuse a slot file or the lock whose own list lets anyone but those three read or write it, or which anyone else owns, because a file's own list decides who reaches it |
 //!
 //! **The descriptor is given to `CreateFileW` and `CreateDirectoryW`, not set
@@ -316,9 +317,10 @@ pub(crate) fn refuse_unsafe_file(file: &File, name: &'static str) -> Result<()> 
 /// Create the store directory under a protected list granting this user
 /// full control, inherited by every file and directory created inside it.
 ///
-/// The Windows arm of [`super`]'s function by this name. Like the mode on
-/// Unix, the list applies only on creation, which is why the caller asks this
-/// only when the directory is absent and asks [`refuse_unsafe_dir`] either way.
+/// What `Directory::open(path, true)` does on Unix, where `mkdirat` creates
+/// the directory at `perms::DIR_MODE`. Like the mode on Unix, the list applies
+/// only on creation, which is why the caller asks this only when the directory
+/// is absent and asks [`refuse_unsafe_dir`] either way.
 pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
     let descriptor = Private::descriptor(Inherit::Children)?;
     let attributes = descriptor.attributes();
@@ -380,7 +382,8 @@ pub(crate) fn open_slot(path: &Path) -> Result<Option<File>> {
 }
 
 /// Open the lock file, creating it under a protected list granting this user
-/// full control if absent, and **never** truncating it.
+/// full control if absent, and **never** truncating it: what
+/// `Directory::open_lock` does on Unix, at `perms::FILE_MODE`.
 ///
 /// `OPEN_ALWAYS` is Win32's create-if-absent without truncation, and the list
 /// applies only when it creates -- the Unix arm's mode rule, unchanged.
