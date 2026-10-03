@@ -1155,9 +1155,9 @@ fn cmd_send<M: Medium, T: Transport>(
         Ok(p) => p,
         Err(e) => return Outcome::Failed(e),
     };
-    // **Everything that can refuse has refused by this line.** What follows is
-    // one reservation and then formatting, so the account is not emptied by a
-    // run that then fails to render its own page. Both renderings are
+    // Check every destination can render before entering the reservation
+    // path, so the account is not emptied by a run that then fails to
+    // render its own page. Both renderings are
     // ATTEMPTED here and their results thrown away, because whether they
     // succeed is a decision -- it decides whether a key is spent -- while what
     // they produce is the renderer's.
@@ -1332,6 +1332,22 @@ fn stamp(ms: i64) -> String {
     format!("{ms} ms since the epoch ({} s)", ms / 1_000)
 }
 
+/// External text stays on its own display line and cannot control the terminal.
+/// Program-owned newlines and indentation are added by each caller.
+fn terminal_text(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for ch in value.chars() {
+        if ch.is_control()
+            || matches!(ch, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
+        {
+            out.extend(ch.escape_default());
+        } else {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 /// An operation's address, rendered for a person where it can be.
 ///
 /// The Mesh sends a 20-byte tag for the accounts it indexes and a 40-byte
@@ -1346,18 +1362,18 @@ fn explorer_address(text: &str) -> String {
         for (i, b) in tag.iter_mut().enumerate() {
             match body.get(i * 2..i * 2 + 2).and_then(|p| u8::from_str_radix(p, 16).ok()) {
                 Some(v) => *b = v,
-                None => return text.to_owned(),
+                None => return terminal_text(text),
             }
         }
         return match destination(&tag) {
-            Ok(d) => format!("{d}  ({text})"),
-            Err(_) => text.to_owned(),
+            Ok(d) => format!("{d}  ({})", terminal_text(text)),
+            Err(_) => terminal_text(text),
         };
     }
     if body.len() == ADDR_LEN * 2 {
-        return format!("{text}  (a 40-byte ledger address: tag then the key's hash -- not a destination)");
+        return format!("{}  (a 40-byte ledger address: tag then the key's hash -- not a destination)", terminal_text(text));
     }
-    text.to_owned()
+    terminal_text(text)
 }
 
 /// The sentence every page that reads `/search/transactions` carries.
@@ -1374,10 +1390,10 @@ const BLOCK_CONVENTION: &str = "read from /block, which re-parses the wire: a so
 fn operation_lines(ops: &[codec::Operation], indent: &str) -> String {
     let mut out = String::new();
     for op in ops {
-        out.push_str(&format!("{indent}{:>2}. {:<21} {}\n", op.index, op.kind, nano_and_mcm(op.amount)));
+        out.push_str(&format!("{indent}{:>2}. {:<21} {}\n", op.index, terminal_text(&op.kind), nano_and_mcm(op.amount)));
         out.push_str(&format!("{indent}    {}\n", explorer_address(&op.address)));
         if !op.memo.is_empty() {
-            out.push_str(&format!("{indent}    memo {}\n", op.memo));
+            out.push_str(&format!("{indent}    memo {}\n", terminal_text(&op.memo)));
         }
     }
     out
@@ -1386,7 +1402,7 @@ fn operation_lines(ops: &[codec::Operation], indent: &str) -> String {
 fn metadata_lines(meta: &[(String, String)], indent: &str) -> String {
     let mut out = String::new();
     for (k, v) in meta {
-        out.push_str(&format!("{indent}{k} = {v}\n"));
+        out.push_str(&format!("{indent}{} = {}\n", terminal_text(k), terminal_text(v)));
     }
     out
 }

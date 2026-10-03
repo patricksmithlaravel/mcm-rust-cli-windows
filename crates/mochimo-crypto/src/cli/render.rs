@@ -836,7 +836,7 @@ fn recent_transactions(
             .operations
             .iter()
             .find(|o| !o.memo.is_empty())
-            .map(|o| o.memo.clone())
+            .map(|o| super::terminal_text(&o.memo))
             .unwrap_or_default();
         out.push_str(&format!(
             "  block {:>9}  {}  {:<4}  {}\n",

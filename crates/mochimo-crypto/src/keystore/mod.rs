@@ -140,9 +140,10 @@
 //!
 //! # What `open` refuses, and why
 //!
-//! A group- or other-writable directory (a co-user could plant the temp as a
-//! symlink; `O_NOFOLLOW` needs libc, so the permission check stands in and
-//! says so). A **missing snapshot** — an absent file is not an empty store;
+//! A directory owned by another user or writable by group/others. Unix
+//! checks the opened directory and keeps it for every subsequent operation;
+//! no-follow opens refuse symbolic links for the store, lock and snapshot.
+//! A **missing snapshot** — an absent file is not an empty store;
 //! treating it as one is I5's index-zero assumption reached through the
 //! filesystem, so a genuinely new store goes through [`Keystore::create`]. A
 //! stale temp is unlinked after the lock is taken and is never adopted even
@@ -220,6 +221,10 @@ compile_error!(
 );
 
 pub(crate) mod crypt;
+#[cfg(unix)]
+mod directory;
+#[cfg(unix)]
+pub use directory::Directory;
 pub mod format;
 pub mod medium;
 pub(crate) mod perms;
@@ -229,7 +234,9 @@ mod slots;
 pub mod spend;
 
 use std::collections::BTreeMap;
-use std::fs::{self, File, TryLockError};
+use std::fs::{File, TryLockError};
+#[cfg(windows)]
+use std::fs;
 use std::io::Read;
 #[cfg(windows)]
 use std::io::{Seek, SeekFrom};
@@ -309,6 +316,8 @@ enum State {
 #[must_use]
 pub struct Keystore<M: Medium = Disk> {
     dir: PathBuf,
+    #[cfg(unix)]
+    directory: Directory,
     _lock: File,
     medium: M,
     state: State,
@@ -429,6 +438,20 @@ fn io(op: &'static str) -> impl Fn(std::io::Error) -> Error {
     move |e| Error::Io { op, kind: e.kind() }
 }
 
+#[cfg(unix)]
+fn take_lock(dir: &Directory) -> Result<File> {
+    let file = dir.open_lock(LOCK_NAME).map_err(io("open lock"))?;
+    match file.try_lock() {
+        Ok(()) => Ok(file),
+        Err(TryLockError::WouldBlock) => Err(Error::Locked),
+        Err(TryLockError::Error(e)) => Err(Error::Io {
+            op: "flock",
+            kind: e.kind(),
+        }),
+    }
+}
+
+#[cfg(windows)]
 fn take_lock(dir: &Path) -> Result<File> {
     let file = perms::open_private_lock(&dir.join(LOCK_NAME)).map_err(io("open lock"))?;
     // A lock file anyone else can open is one they can hold, so on Windows
@@ -540,6 +563,14 @@ pub fn newest_image(dir: &Path, password: &[u8]) -> Result<Zeroizing<Vec<u8>>> {
     }
 }
 
+#[cfg(unix)]
+fn occupied_at(dir: &Directory) -> Result<Option<&'static str>> {
+    Ok(dir.exists(SNAPSHOT_NAME).map_err(io("stat snapshot"))?.then_some("snapshot"))
+}
+
+#[cfg(windows)]
+fn occupied_at(dir: &Path) -> Result<Option<&'static str>> { Ok(occupied(dir)) }
+
 impl Keystore<Disk> {
     /// Create a new keystore in `dir` (created `0700` if absent). Refuses a
     /// directory that already holds a snapshot, and a live holder of its lock
@@ -563,14 +594,22 @@ impl<M: Medium> Keystore<M> {
     /// [`Keystore::create`] over an explicit medium (tests inject
     /// [`Instrumented`]).
     pub fn create_with(dir: &Path, medium: M, init: &Init<'_>) -> Result<Self> {
-        if !dir.exists() {
-            perms::create_private_dir(dir).map_err(io("create directory"))?;
-        }
-        perms::refuse_unsafe_dir(dir)?;
-        if let Some(what) = occupied(dir) {
+        #[cfg(unix)]
+        let directory = Directory::open(dir, true)?;
+        #[cfg(unix)]
+        let store_dir = &directory;
+        #[cfg(windows)]
+        let store_dir = {
+            if !dir.exists() {
+                perms::create_private_dir(dir).map_err(io("create directory"))?;
+            }
+            perms::refuse_unsafe_dir(dir)?;
+            dir
+        };
+        if let Some(what) = occupied_at(store_dir)? {
             return Err(Error::Exists { what });
         }
-        let lock = take_lock(dir)?;
+        let lock = take_lock(store_dir)?;
         // **Asked again under the lock**. The check above
         // runs before the lock, so a second `create` can pass it while a
         // first holds the lock with its snapshot not yet renamed in, and then
@@ -582,7 +621,7 @@ impl<M: Medium> Keystore<M> {
         // directly -- nothing can be injected between two adjacent
         // statements without a hook -- but a fault-injection row removed the
         // check above and this one still refused an existing store, so it is live.
-        if let Some(what) = occupied(dir) {
+        if let Some(what) = occupied_at(store_dir)? {
             return Err(Error::Exists { what });
         }
         // Derived before the first write, so a store that exists is a store
@@ -591,6 +630,8 @@ impl<M: Medium> Keystore<M> {
         let key = crypt::derive_key(init.password, &init.salt, kdf)?;
         let mut ks = Keystore {
             dir: dir.to_path_buf(),
+            #[cfg(unix)]
+            directory,
             _lock: lock,
             medium,
             state: State::Live {
@@ -621,6 +662,9 @@ impl<M: Medium> Keystore<M> {
         // commit leaves. On Windows the medium's `fsync_parent` flushes
         // nothing, there being no documented call; it is called here on both
         // platforms so that `create`'s order is one.
+        #[cfg(unix)]
+        ks.medium.fsync_parent(&ks.directory)?;
+        #[cfg(windows)]
         ks.medium.fsync_parent(dir)?;
         let _durable: Durable = ks.commit(&image)?;
         Ok(ks)
@@ -629,7 +673,7 @@ impl<M: Medium> Keystore<M> {
     /// [`Keystore::open`] over an explicit medium.
     #[cfg(unix)]
     pub fn open_with(dir: &Path, medium: M, unlock: &Unlock<'_>) -> Result<Self> {
-        perms::refuse_unsafe_dir(dir)?;
+        let directory = Directory::open(dir, false)?;
         // The snapshot's existence is checked before the lock file is touched,
         // so an `open` that reports `Missing` leaves no lock behind. **Every
         // refusal below this point does leave one**, because
@@ -638,23 +682,20 @@ impl<M: Medium> Keystore<M> {
         // -- `create` no longer reads the file's existence as a store -- and
         // the module doc's "The lock" says why it is left rather than moved
         // or unlinked. The authoritative read happens after the lock, below.
-        let path = dir.join(SNAPSHOT_NAME);
-        if !path.exists() {
+        if !directory.exists(SNAPSHOT_NAME).map_err(io("stat snapshot"))? {
             return Err(Error::Missing);
         }
-        let lock = take_lock(dir)?;
+        let lock = take_lock(&directory)?;
         // A stale temp is a partial or complete image from an interrupted
         // commit. Never adopted; unlinked so it cannot leak or confuse a
         // later listing. Failure to unlink here means rename would fail too.
-        let temp = dir.join(TEMP_NAME);
-        if temp.exists() {
-            fs::remove_file(&temp).map_err(io("remove stale temp"))?;
-        }
-        let meta = match fs::metadata(&path) {
-            Ok(m) => m,
+        directory.remove_temp(TEMP_NAME).map_err(io("remove stale temp"))?;
+        let mut file = match directory.open_snapshot(SNAPSHOT_NAME) {
+            Ok(file) => file,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(Error::Missing),
-            Err(e) => return Err(io("stat snapshot")(e)),
+            Err(e) => return Err(io("open snapshot")(e)),
         };
+        let meta = file.metadata().map_err(io("stat snapshot"))?;
         // The same range `format::read_header` names for the same
         // refusal: one `what`, one minimum (the empty store's image), one
         // maximum.
@@ -672,7 +713,6 @@ impl<M: Medium> Keystore<M> {
                 got: meta.len(),
             });
         }
-        let mut file = File::open(&path).map_err(io("open snapshot"))?;
         let mut image: Zeroizing<Vec<u8>> = Zeroizing::new(vec![0u8; len]);
         file.read_exact(&mut image).map_err(io("read snapshot"))?;
         let mut extra = [0u8; 1];
@@ -695,6 +735,7 @@ impl<M: Medium> Keystore<M> {
         let parsed = format::parse_with_key(&image, &key)?;
         Ok(Keystore {
             dir: dir.to_path_buf(),
+            directory,
             _lock: lock,
             medium,
             state: State::Live {
@@ -959,15 +1000,16 @@ impl<M: Medium> Keystore<M> {
     /// interrupted step left. On Windows the steps are the slot layout's,
     /// in `Keystore::write_slots`, and they return into the same arm.
     fn commit(&mut self, image: &[u8]) -> Result<Durable> {
+        #[cfg(windows)]
         let dir = self.dir.clone();
         #[cfg(windows)]
         let outcome = self.write_slots(&dir, image);
         #[cfg(unix)]
         let outcome = (|| -> Result<()> {
-            let written = self.medium.write_temp(&dir, image)?;
+            let written = self.medium.write_temp(&self.directory, image)?;
             let synced = self.medium.fsync_file(written)?;
-            let renamed = self.medium.rename(synced, &dir)?;
-            self.medium.fsync_dir(renamed, &dir)
+            let renamed = self.medium.rename(synced, &self.directory)?;
+            self.medium.fsync_dir(renamed, &self.directory)
         })();
         match outcome {
             Ok(()) => {

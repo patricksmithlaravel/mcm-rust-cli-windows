@@ -124,6 +124,9 @@ fn id_for(name: &str, s: &Spend) -> [u8; 32] {
     let (_dir, ks) = store(name);
     let m = master();
     let chain = Chain::new(&[(TAG, ChainState::At(addr_at(0), 5_000_000))]);
+    if s.blk_to_live != 0 {
+        chain.set_tip(s.blk_to_live - 1);
+    }
     let mut w = Wallet::open(ks, MeshClient::new(chain), Some(&m)).unwrap_or_else(|e| panic!("{e}"));
     let plan = w
         .plan(
@@ -6217,6 +6220,7 @@ fn send_and_resign_print_the_block_to_live_they_signed_over() {
     // Non-zero, through a refusing socket, then reproduced.
     let (dir, ks) = store("cli-btl-4242");
     let chain = Chain::new(&[(TAG, ChainState::At(addr_at(0), 5_000_000))]);
+    chain.set_tip(4_000);
     chain.refuses_submit();
     let mut s = spend();
     s.blk_to_live = 4_242;
@@ -6777,6 +6781,98 @@ impl mochimo_crypto::mesh::Transport for Explorer {
             other => panic!("the explorer double was asked for {other}"),
         }
     }
+}
+
+
+/// An explorer reply carried through the transport, codec and CLI renderer.
+fn render_explorer_reply(path: &'static str, body: &serde_json::Value, cmd: &Command) -> cli::Report {
+    struct Reply {
+        path: &'static str,
+        body: Vec<u8>,
+    }
+    impl mochimo_crypto::mesh::Transport for Reply {
+        fn post(&self, path: &str, _body: &[u8]) -> mochimo_crypto::Result<Vec<u8>> {
+            assert_eq!(path, self.path);
+            Ok(self.body.clone())
+        }
+    }
+    let body = serde_json::to_vec(body).unwrap_or_else(|e| panic!("{e}"));
+    cli::run_explorer(&MeshClient::new(Reply { path, body }), cmd)
+}
+
+/// Control characters are checked in memory; no reply is sent to a terminal.
+#[test]
+fn transaction_escapes_every_external_text_field() {
+    use serde_json::{json, Value};
+    let row = Explorer::search_row(1_078_535, &hexs(&TAG));
+    let mut row: Value = serde_json::from_str(&row).unwrap_or_else(|e| panic!("{e}"));
+    let mut controls = String::new();
+    for code in (0..=0x1f).chain(0x7f..=0x9f).chain([
+        0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e,
+        0x2066, 0x2067, 0x2068, 0x2069,
+    ]) {
+        controls.push(char::from_u32(code).unwrap_or_else(|| panic!("invalid test character")));
+    }
+    row["operations"][0]["type"] = json!("TYPE\u{1b}");
+    row["operations"][0]["account"]["address"] = json!("fallback\raddress");
+    row["operations"][0]["metadata"] = json!({"memo": format!("café 東京{controls}")});
+    // Both fixed-width branches must also treat malformed addresses as text.
+    row["operations"][1]["account"]["address"] = json!(format!("{}\u{9b}", "a".repeat(38)));
+    row["operations"][2]["account"]["address"] = json!(format!("{}\u{9b}", "b".repeat(78)));
+    row["metadata"] = json!({"key\u{202e}": "value\u{2066}end\u{2069}\u{7}"});
+    let body = json!({"transactions": [row], "total_count": 1});
+    let cmd = Command::LookupTransaction { hash: [0x18; 32] };
+    let report = render_explorer_reply("/search/transactions", &body, &cmd);
+    assert_eq!(report.code, Code::Ok);
+    for ch in controls.chars().filter(|c| *c != '\n') {
+        assert!(!report.text.contains(ch), "raw control {ch:?} in output");
+    }
+    for visible in [
+        r"TYPE\u{1b}",
+        r"fallback\raddress",
+        r"memo café 東京\u{0}",
+        r"\t\n\u{b}",
+        r"key\u{202e} = value\u{2066}end\u{2069}\u{7}",
+    ] {
+        assert!(report.text.contains(visible), "missing escaped field {visible:?}");
+    }
+    assert!(report.text.contains(&format!("{}\\u{{9b}}", "a".repeat(38))));
+    assert!(report.text.contains(&format!("{}\\u{{9b}}", "b".repeat(78))));
+    let mut clean = body.clone();
+    clean["transactions"][0]["operations"][0]["metadata"]["memo"] = json!("café 東京");
+    let clean_report = render_explorer_reply("/search/transactions", &clean, &cmd);
+    assert_eq!(report.text.lines().count(), clean_report.text.lines().count(), "the memo added a display line");
+}
+
+#[test]
+fn recent_transactions_escapes_memos_and_preserves_unicode() {
+    use serde_json::{json, Value};
+    let row = Explorer::search_row(1_078_535, &hexs(&TAG));
+    let mut row: Value = serde_json::from_str(&row).unwrap_or_else(|e| panic!("{e}"));
+    row["operations"][1]["metadata"]["memo"] = json!("café 東京\nnext\t\u{1b}\u{9b}\u{202e}");
+    let body = json!({"transactions": [row], "total_count": 1});
+    let report = render_explorer_reply(
+        "/search/transactions", &body, &Command::RecentTransactions { tag: TAG, count: 5 },
+    );
+    assert_eq!(report.code, Code::Ok);
+    assert!(report.text.contains("                    memo café 東京\\nnext\\t\\u{1b}\\u{9b}\\u{202e}\n"));
+    assert!(!report.text.chars().any(|c| c.is_control() && c != '\n'));
+    assert!(!report.text.contains('\u{202e}'));
+}
+
+#[test]
+fn block_escapes_the_reward_address() {
+    use serde_json::{json, Value};
+    let mut body: Value = serde_json::from_str(&Explorer::block_body(1_078_535))
+        .unwrap_or_else(|e| panic!("{e}"));
+    body["block"]["transactions"][0]["operations"][0]["account"]["address"] = json!("reward\naddress\u{1b}\u{2067}");
+    let report = render_explorer_reply(
+        "/block", &body, &Command::Block { at: args::BlockAt::Index(1_078_535) },
+    );
+    assert_eq!(report.code, Code::Ok);
+    assert!(report.text.contains("    to     reward\\naddress\\u{1b}\\u{2067}\n"));
+    assert!(!report.text.chars().any(|c| c.is_control() && c != '\n'));
+    assert!(!report.text.contains('\u{2067}'));
 }
 
 /// **`transaction <hash>`**: the indexer's rendering of one transaction, and

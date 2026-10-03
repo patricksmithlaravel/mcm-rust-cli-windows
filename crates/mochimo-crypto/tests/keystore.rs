@@ -2467,3 +2467,89 @@ fn a_store_that_does_not_decrypt_says_it_cannot_tell_why_and_what_to_try() {
     assert_eq!(err, Some(Error::WrongPassword));
     println!("  wrong password: the refusal says by design and names three things to try; the variant is unchanged");
 }
+
+/// An ancestor rename must never separate the lock from the signing state.
+#[cfg(unix)]
+#[test]
+fn unix_commit_keeps_the_locked_directory_after_path_replacement() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = ScratchDir::new("held-directory");
+    std::fs::create_dir(root.path()).unwrap();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+    let path = root.path().join("store");
+    let moved = root.path().join("moved");
+    let mut ks = Keystore::create(&path, &keystore_harness::init()).unwrap();
+    ks.add(imported_account()).unwrap();
+    std::fs::rename(&path, &moved).unwrap();
+    std::fs::create_dir(&path).unwrap();
+    assert!(matches!(Keystore::open(&moved, &keystore_harness::unlock()), Err(Error::Locked)));
+    let receipt = ks.persist_advance(&IMPORTED_TAG, &DIGEST, FIGURES).unwrap();
+    let signed = ks.sign_spend(&DIGEST, receipt, KeyAccess::StoredRoot).unwrap();
+    assert_eq!(signed.spent_index, WotsIndex::ZERO);
+    assert_eq!(std::fs::read_dir(&path).unwrap().count(), 0, "replacement directory received store data");
+    drop(ks);
+    let mut reopened = Keystore::open(&moved, &keystore_harness::unlock()).unwrap();
+    let view = reopened.view(&IMPORTED_TAG).unwrap().unwrap();
+    assert_eq!(view.wots_index, pos(1));
+    assert_eq!(view.pending.unwrap().digest, DIGEST);
+    assert!(reopened.persist_advance(&IMPORTED_TAG, &[0x99; 32], FIGURES).is_err());
+}
+
+/// Store entry opens must not follow links outside the verified directory.
+#[cfg(unix)]
+#[test]
+fn unix_store_lock_and_snapshot_symbolic_links_are_refused() {
+    use std::os::unix::fs::symlink;
+    let root = ScratchDir::new("store-links");
+    std::fs::create_dir(root.path()).unwrap();
+    let path = root.path().join("store");
+    drop(Keystore::create(&path, &keystore_harness::init()).unwrap());
+    let alias = root.path().join("alias");
+    symlink(&path, &alias).unwrap();
+    for spelling in [alias.clone(), alias.join("."), alias.join("")] {
+        assert!(Keystore::open(&spelling, &keystore_harness::unlock()).is_err());
+        assert!(Keystore::create(&spelling, &keystore_harness::init()).is_err());
+    }
+    for name in ["keystore.lock", "accounts.mks"] {
+        let entry = path.join(name);
+        let outside = root.path().join(name);
+        std::fs::rename(&entry, &outside).unwrap();
+        let before = std::fs::read(&outside).unwrap();
+        symlink(&outside, &entry).unwrap();
+        assert!(Keystore::open(&path, &keystore_harness::unlock()).is_err());
+        assert_eq!(std::fs::read(&outside).unwrap(), before);
+        std::fs::remove_file(&entry).unwrap();
+        std::fs::rename(&outside, &entry).unwrap();
+    }
+    drop(Keystore::open(&path, &keystore_harness::unlock()).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_directory_handles_preserve_dot_and_parent_path_meaning() {
+    let root = ScratchDir::new("store-path-components");
+    std::fs::create_dir(root.path()).unwrap();
+    let path = root.path().join("store");
+    drop(Keystore::create(&path, &keystore_harness::init()).unwrap());
+    std::fs::create_dir(path.join("child")).unwrap();
+    for alias in [path.join("."), path.join("child/.."), path.join("")] {
+        drop(Keystore::open(&alias, &keystore_harness::unlock()).unwrap());
+    }
+}
+
+/// Opening an existing store needs traversal, not a listing of its parent.
+#[cfg(unix)]
+#[test]
+fn unix_existing_store_opens_under_an_execute_only_parent() {
+    use std::os::unix::fs::PermissionsExt;
+    let root = ScratchDir::new("execute-only-parent");
+    std::fs::create_dir(root.path()).unwrap();
+    let path = root.path().join("store");
+    drop(Keystore::create(&path, &keystore_harness::init()).unwrap());
+    let original = std::fs::metadata(root.path()).unwrap().permissions();
+    std::fs::set_permissions(root.path(), std::fs::Permissions::from_mode(0o111)).unwrap();
+    let opened = Keystore::open(&path, &keystore_harness::unlock());
+    // Restore access before checking the result so cleanup also works on failure.
+    std::fs::set_permissions(root.path(), original).unwrap();
+    assert_eq!(opened.unwrap().generation().unwrap(), 0);
+}

@@ -13,10 +13,11 @@
 //! The property is per account, because the hazard is: a key signs twice or it
 //! does not, and that is a fact about one key stream. An account the node
 //! answered for with exactly the address this store derived at its stored
-//! position has a confirmed position -- no wrong seed, wrong chain or lying
-//! node can produce a match at an address only the chain can hold -- so its
-//! next key is provably unused. Nothing that keeps that key from signing twice
-//! consults another account.
+//! position agrees with that node's observation. The response is not a
+//! proof of the ledger: a node can repeat a public address and invent a
+//! balance. The durable local index prevents reuse within this store; it
+//! cannot authenticate chain state or account for another copy of the seed.
+//! Nothing that keeps a key from signing twice consults another account.
 //!
 //! # THE BOUND, and it is exactly [`crate::keystore::Keystore::sign_spend`]'s
 //!
@@ -215,10 +216,10 @@ impl<M: Medium, T: Transport> Wallet<M, T> {
         // **Refused only when nothing is operable.** A wallet whose every
         // account diverged offers no action at all, and `StartupRefusal` is
         // that state. A wallet with one reconciled account offers exactly that
-        // account: its key stream is confirmed at the stored position by an
-        // address only the chain can produce, and nothing that keeps a key
-        // from signing twice consults a sibling. A store with no accounts in
-        // it diverges nowhere and opens, as it always has.
+        // account: its address agrees with the node's observation, and
+        // nothing that keeps a key from signing twice consults a sibling.
+        // This comparison does not authenticate the node's answer. A store
+        // with no accounts in it diverges nowhere and opens, as it always has.
         if ok.is_empty() && !diverged.is_empty() {
             return Err(StartupRefusal { diverged, accounts });
         }
@@ -352,6 +353,13 @@ impl<M: Medium, T: Transport> Wallet<M, T> {
 
     /// Reserve the key the plan names, sign, and assemble the wire image.
     ///
+    /// Before any write, recheck its position and addresses against the
+    /// store, a non-zero expiry against the current tip, and its source and
+    /// balance against a fresh ledger read. A refusal leaves the key unused.
+    /// These observations trust the configured node and cannot prevent a
+    /// balance change or expiry after signing; either can permanently lock
+    /// funds because the reserved key must never sign a different digest.
+    ///
     /// **The returned bytes are the retry artifact and this wallet does not
     /// keep them**: the caller owns them from here until the
     /// reservation resolves. They are not persisted because the format's
@@ -371,6 +379,38 @@ impl<M: Medium, T: Transport> Wallet<M, T> {
         // plan for a diverged account cannot be built through `plan` above,
         // and this covers a plan built any other way.
         self.require_reconciled(&tag)?;
+        // A caller can keep a plan across a settle, or build it from
+        // another store's addresses. Check key access and the complete
+        // address pair before persisting anything irreversible.
+        let addresses = self.store.spend_addresses(&tag, &access)?;
+        if addresses.position != plan.position() {
+            return Err(Error::StaleSpendPlan {
+                planned: plan.position().get(),
+                stored: addresses.position.get(),
+            });
+        }
+        if addresses.source != *plan.source() || addresses.change != *plan.change() {
+            return Err(Error::SpendPlanAddressMismatch);
+        }
+        if plan.blk_to_live() != 0 {
+            let tip = self.client.network_status()?.index;
+            // The next block must still be able to include the spend. The
+            // arrival window is 256 blocks (tx_val at the fixture pin;
+            // docs/specification.md, Transactions).
+            if !matches!(plan.blk_to_live().checked_sub(tip), Some(1..=256)) {
+                return Err(Error::InvalidExpiry { expiry: plan.blk_to_live(), tip });
+            }
+        }
+        // Read the ledger last, immediately before reservation. This closes
+        // changes since planning, but neither authenticates this node's
+        // answer nor prevents an incoming credit after this observation.
+        let entry = self.client.resolve_tag(&tag)?;
+        if entry.address != addresses.source {
+            return Err(Error::ChainAddressMismatch { position: addresses.position.get() });
+        }
+        if entry.balance != plan.balance() {
+            return Err(Error::BalanceChanged { planned: plan.balance(), current: entry.balance });
+        }
         // The reservation carries the plan's two figures: the balance it
         // was built against and its block-to-live, so a
         // later `open` can compare them to the entry and the tip.

@@ -9,11 +9,12 @@
 // review finding. The stderr must name the mismatched token
 // types.
 
-use mochimo_crypto::keystore::{Disk, Medium};
+use mochimo_crypto::keystore::{Directory, Disk, Medium};
 
-fn main() {
+fn out_of_order(dir: &Directory) {
     let mut m = Disk;
-    let dir = std::path::Path::new("/nonexistent");
     let written = m.write_temp(dir, &[]).unwrap();
     let _ = m.rename(written, dir);
 }
+
+fn main() {}

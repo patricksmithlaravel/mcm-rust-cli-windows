@@ -922,6 +922,7 @@ fn a_reverted_settle_is_reported_behind_with_the_retained_block_and_every_cause(
     // Reserve at the store's index with block-to-live 4242 and settle on one
     // observation of the change key; hand back what was reserved.
     let reserve_and_settle = |w: &mut Wallet<Disk, Chain>, at: u32| -> Pending {
+        w.client().transport().set_tip(4_241);
         let plan = w.plan(&TAG, &access(&m), dsts(), MFEE, 4_242).unwrap_or_else(|e| panic!("plan: {e}"));
         let block = Pending {
             spent_index: pos(at),
@@ -1050,6 +1051,9 @@ fn a_reservation_is_dead_when_the_balance_moved_or_the_tip_reached_the_block_to_
         let plan = w
             .plan(&TAG, &access(&m), vec![Destination { tag: [0x6b; ADDR_TAG_LEN], reference: [0; 16], amount: 1_000_000 }], MFEE, btl)
             .unwrap_or_else(|e| panic!("plan: {e}"));
+        if btl != 0 {
+            w.client().transport().set_tip(btl - 1);
+        }
         assert_eq!(plan.figures(), Figures { reserved_balance: 5_000_000, blk_to_live: btl });
         let _ = w.reserve_and_sign(&plan, access(&m)).unwrap_or_else(|e| panic!("{e}"));
         dir
@@ -1894,4 +1898,126 @@ fn the_wallet_spend_path_hands_the_retry_artifact_to_the_caller() {
         ),
         Err(Error::PendingUnresolved { .. })
     ));
+}
+
+/// A changed observation must be refused while the key is still unused.
+/// Retrying after a fresh plan remains safe because no reservation exists.
+#[test]
+fn reservation_preflight_refuses_changed_chain_state_without_writing() {
+    let (_dir, ks) = store("preflight-chain");
+    let m = master();
+    let chain = Chain::new(&[(TAG, ChainState::At(addr_at(0), 5_000_000))]);
+    let mut w = Wallet::open(ks, MeshClient::new(chain), Some(&m)).unwrap_or_else(|e| panic!("{e}"));
+    let dsts = vec![Destination { tag: [0x6b; ADDR_TAG_LEN], reference: [0; 16], amount: 1_000_000 }];
+    let plan = w.plan(&TAG, &access(&m), dsts.clone(), MFEE, 0).unwrap_or_else(|e| panic!("{e}"));
+    let generation = w.store().generation().unwrap_or_else(|e| panic!("{e}"));
+    let state = w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}"));
+    for (observation, expected) in [
+        (ChainState::At(addr_at(0), 6_000_000), Error::BalanceChanged { planned: 5_000_000, current: 6_000_000 }),
+        (ChainState::At(addr_at(0), 4_000_000), Error::BalanceChanged { planned: 5_000_000, current: 4_000_000 }),
+        (ChainState::At(addr_at(1), 5_000_000), Error::ChainAddressMismatch { position: 0 }),
+        (ChainState::Absent, Error::Mesh { code: 4, retriable: false }),
+        (ChainState::Unreachable, Error::Transport {
+            op: "connect",
+            kind: mochimo_crypto::TransportKind::Io(std::io::ErrorKind::ConnectionRefused),
+        }),
+    ] {
+        w.client().transport().set(TAG, observation);
+        assert_eq!(w.reserve_and_sign(&plan, access(&m)).err(), Some(expected));
+        assert_eq!(w.store().generation().unwrap_or_else(|e| panic!("{e}")), generation);
+        assert_eq!(w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}")), state);
+    }
+    w.client().transport().set(TAG, ChainState::At(addr_at(0), 6_000_000));
+    let fresh = w.plan(&TAG, &access(&m), dsts, MFEE, 0).unwrap_or_else(|e| panic!("{e}"));
+    let signed = w.reserve_and_sign(&fresh, access(&m)).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(signed.wire().len(), 2_408);
+    let view = w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}")).unwrap_or_else(|| panic!("gone"));
+    assert_eq!(view.wots_index, pos(1));
+    assert_eq!(view.pending.map(|p| p.digest), Some(fresh.digest()));
+}
+
+/// Both the local key position and the full address pair are checked before
+/// reserving. A failed plan cannot consume a different key or redirect change.
+#[test]
+fn reservation_preflight_binds_plan_to_current_store_keys() {
+    let (_dir, ks) = store("preflight-keys");
+    let m = master();
+    let chain = Chain::new(&[(TAG, ChainState::At(addr_at(0), 5_000_000))]);
+    let mut w = Wallet::open(ks, MeshClient::new(chain), Some(&m)).unwrap_or_else(|e| panic!("{e}"));
+    let dsts = vec![Destination { tag: [0x6b; ADDR_TAG_LEN], reference: [0; 16], amount: 1_000_000 }];
+    let original = w.plan(&TAG, &access(&m), dsts.clone(), MFEE, 0).unwrap_or_else(|e| panic!("{e}"));
+    let generation = w.store().generation().unwrap_or_else(|e| panic!("{e}"));
+    let state = w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}"));
+    for change_only in [false, true] {
+        let mut addresses = w.spend_addresses(&TAG, &access(&m)).unwrap_or_else(|e| panic!("{e}"));
+        if change_only {
+            addresses.change[20] ^= 1;
+        } else {
+            addresses.source[20] ^= 1;
+        }
+        let plan = mochimo_crypto::mesh::spend::SpendPlan::new(
+            &addresses,
+            &mochimo_crypto::mesh::LedgerEntry { address: addresses.source, balance: 5_000_000 },
+            dsts.clone(), MFEE, 0,
+        ).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(w.reserve_and_sign(&plan, access(&m)).err(), Some(Error::SpendPlanAddressMismatch));
+        assert_eq!(w.store().generation().unwrap_or_else(|e| panic!("{e}")), generation);
+        assert_eq!(w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}")), state);
+    }
+    let wrong = mochimo_crypto::Secret::new([0x77; 32]);
+    assert!(w.reserve_and_sign(&original, access(&wrong)).is_err());
+    assert_eq!(w.store().generation().unwrap_or_else(|e| panic!("{e}")), generation);
+    assert_eq!(w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}")), state);
+    let _signed = w.reserve_and_sign(&original, access(&m)).unwrap_or_else(|e| panic!("{e}"));
+    w.client().transport().set(TAG, ChainState::At(addr_at(1), 4_000_000));
+    assert!(matches!(w.settle_if_landed(&TAG, &access(&m)), Ok(Settlement::Settled { .. })));
+    let generation = w.store().generation().unwrap_or_else(|e| panic!("{e}"));
+    let state = w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(w.reserve_and_sign(&original, access(&m)).err(), Some(Error::StaleSpendPlan { planned: 0, stored: 1 }));
+    assert_eq!(w.store().generation().unwrap_or_else(|e| panic!("{e}")), generation);
+    assert_eq!(w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}")), state);
+    let fresh = w.plan(&TAG, &access(&m), dsts, MFEE, 0).unwrap_or_else(|e| panic!("{e}"));
+    let _signed = w.reserve_and_sign(&fresh, access(&m)).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Non-zero expiry needs a readable tip and a remaining inclusion window.
+/// Boundary arithmetic must not wrap near the largest representable block.
+#[test]
+fn reservation_preflight_checks_expiry_before_writing() {
+    let m = master();
+    for (tip, expiry, accepted) in [
+        (None, 101, false),
+        (Some(100), 99, false),
+        (Some(100), 100, false),
+        (Some(100), 101, true),
+        (Some(100), 356, true),
+        (Some(100), 357, false),
+        (Some(u64::MAX), u64::MAX, false),
+        (Some(u64::MAX - 1), u64::MAX, true),
+        (None, 0, true),
+    ] {
+        let (_dir, ks) = store("preflight-expiry");
+        let chain = Chain::new(&[(TAG, ChainState::At(addr_at(0), 5_000_000))]);
+        if let Some(tip) = tip {
+            chain.set_tip(tip);
+        }
+        let mut w = Wallet::open(ks, MeshClient::new(chain), Some(&m)).unwrap_or_else(|e| panic!("{e}"));
+        let dsts = vec![Destination { tag: [0x6b; ADDR_TAG_LEN], reference: [0; 16], amount: 1_000_000 }];
+        let plan = w.plan(&TAG, &access(&m), dsts.clone(), MFEE, expiry).unwrap_or_else(|e| panic!("{e}"));
+        let generation = w.store().generation().unwrap_or_else(|e| panic!("{e}"));
+        let state = w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}"));
+        let result = w.reserve_and_sign(&plan, access(&m));
+        if accepted {
+            assert!(result.is_ok(), "tip {tip:?}, expiry {expiry}: {result:?}");
+        } else {
+            match tip {
+                Some(tip) => assert_eq!(result.err(), Some(Error::InvalidExpiry { expiry, tip })),
+                None => assert!(matches!(result, Err(Error::MeshResponse { .. }))),
+            }
+            assert_eq!(w.store().generation().unwrap_or_else(|e| panic!("{e}")), generation);
+            assert_eq!(w.store().view(&TAG).unwrap_or_else(|e| panic!("{e}")), state);
+            let fresh = w.plan(&TAG, &access(&m), dsts, MFEE, 0).unwrap_or_else(|e| panic!("{e}"));
+            assert!(w.reserve_and_sign(&fresh, access(&m)).is_ok());
+        }
+    }
 }

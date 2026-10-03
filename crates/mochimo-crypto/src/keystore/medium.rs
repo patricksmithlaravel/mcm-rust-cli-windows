@@ -97,13 +97,18 @@
 //! What a tear cannot model is a flushed write lost, which is the premise the
 //! layout rests on and not a case it handles.
 
-use std::fs::{self, File};
+use std::fs::File;
+#[cfg(windows)]
+use std::fs;
 use std::io::Write;
 #[cfg(windows)]
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 
+#[cfg(windows)]
 use super::perms;
+#[cfg(unix)]
+use super::Directory;
 use crate::error::{Error, Result};
 
 pub(crate) const SNAPSHOT_NAME: &str = "accounts.mks";
@@ -141,13 +146,13 @@ pub struct Renamed {
 /// The primitives. See the module doc for why the order is not here.
 #[cfg(unix)]
 pub trait Medium: sealed::Sealed {
-    fn write_temp(&mut self, dir: &Path, image: &[u8]) -> Result<Written>;
+    fn write_temp(&mut self, dir: &Directory, image: &[u8]) -> Result<Written>;
     fn fsync_file(&mut self, written: Written) -> Result<Synced>;
-    fn rename(&mut self, synced: Synced, dir: &Path) -> Result<Renamed>;
-    fn fsync_dir(&mut self, renamed: Renamed, dir: &Path) -> Result<()>;
+    fn rename(&mut self, synced: Synced, dir: &Directory) -> Result<Renamed>;
+    fn fsync_dir(&mut self, renamed: Renamed, dir: &Directory) -> Result<()>;
     /// Flush the directory holding `dir`, which is where `dir`'s own entry
     /// lives. Not a commit step; see the module doc.
-    fn fsync_parent(&mut self, dir: &Path) -> Result<()>;
+    fn fsync_parent(&mut self, dir: &Directory) -> Result<()>;
 }
 
 /// A slot has been written in full at its new length (not yet flushed).
@@ -192,7 +197,7 @@ fn io(op: &'static str) -> impl Fn(std::io::Error) -> Error {
 /// second is what shell completion types -- and opening the empty path
 /// fails, so that answer is read as the working directory it means. Without
 /// the mapping, `create --dir wallet` would be refused at its flush.
-fn parent_of(dir: &Path) -> &Path {
+pub(crate) fn parent_of(dir: &Path) -> &Path {
     match dir.parent() {
         Some(p) if p.as_os_str().is_empty() => Path::new("."),
         Some(p) => p,
@@ -207,28 +212,10 @@ impl sealed::Sealed for Disk {}
 
 #[cfg(unix)]
 impl Medium for Disk {
-    fn write_temp(&mut self, dir: &Path, image: &[u8]) -> Result<Written> {
-        let path = dir.join(TEMP_NAME);
-        // A leftover temp is UNLINKED first, then the temp is created new.
-        // The unlink is what keeps a temp left by an earlier crash from
-        // blocking every future commit; creating new rather than truncating
-        // is what keeps that leftover's mode out of the snapshot, since a
-        // mode passed to `open` applies only when the file is created and a
-        // truncated leftover carries its own permissions through the rename.
-        // `open` already unlinks a stale temp after taking the lock; doing it
-        // here too is what keeps `create`'s first commit, and every other,
-        // from depending on the caller remembering. The mode the temp is
-        // created with is `perms::FILE_MODE`, and the reason it is the same
-        // `0600` the lock file gets is argued there: since format v3 the temp
-        // is a 51-byte plaintext header over a sealed body, so a partial one
-        // leaks the KDF parameters, the salt and the nonce rather than a root
-        // -- metadata, not key material, and still nobody else's.
-        match fs::remove_file(&path) {
-            Ok(()) => {}
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(io("write_temp unlink stale temp")(e)),
-        }
-        let mut file = perms::create_private_file(&path).map_err(io("write_temp open"))?;
+    fn write_temp(&mut self, dir: &Directory, image: &[u8]) -> Result<Written> {
+        let path = dir.path().join(TEMP_NAME);
+        dir.remove_temp(TEMP_NAME).map_err(io("write_temp unlink stale temp"))?;
+        let mut file = dir.create_temp(TEMP_NAME).map_err(io("write_temp open"))?;
         file.write_all(image).map_err(io("write_temp write"))?;
         Ok(Written { file, path })
     }
@@ -238,27 +225,19 @@ impl Medium for Disk {
         Ok(Synced { path: written.path })
     }
 
-    fn rename(&mut self, synced: Synced, dir: &Path) -> Result<Renamed> {
-        fs::rename(&synced.path, dir.join(SNAPSHOT_NAME)).map_err(io("rename"))?;
+    fn rename(&mut self, synced: Synced, dir: &Directory) -> Result<Renamed> {
+        let _ = synced;
+        dir.replace(TEMP_NAME, SNAPSHOT_NAME).map_err(io("rename"))?;
         Ok(Renamed { _private: () })
     }
 
-    fn fsync_dir(&mut self, _renamed: Renamed, dir: &Path) -> Result<()> {
-        // On Apple targets std's sync_all is fcntl(F_FULLFSYNC) with no
-        // fallback; it was measured succeeding on a directory fd on APFS.
-        File::open(dir)
-            .map_err(io("fsync_dir open"))?
-            .sync_all()
-            .map_err(io("fsync_dir"))
+    fn fsync_dir(&mut self, _renamed: Renamed, dir: &Directory) -> Result<()> {
+        // Retain File::sync_all, including Apple's full-flush behavior.
+        dir.sync_all().map_err(io("fsync_dir"))
     }
 
-    fn fsync_parent(&mut self, dir: &Path) -> Result<()> {
-        // The same call as `fsync_dir`, one directory up: `sync_all` on a
-        // directory descriptor, `F_FULLFSYNC` on Apple targets.
-        File::open(parent_of(dir))
-            .map_err(io("fsync_parent open"))?
-            .sync_all()
-            .map_err(io("fsync_parent"))
+    fn fsync_parent(&mut self, dir: &Directory) -> Result<()> {
+        dir.sync_parent().map_err(io("fsync_parent"))
     }
 }
 
@@ -405,9 +384,9 @@ impl<M: Medium> sealed::Sealed for Instrumented<M> {}
 
 #[cfg(unix)]
 impl<M: Medium> Medium for Instrumented<M> {
-    fn write_temp(&mut self, dir: &Path, image: &[u8]) -> Result<Written> {
+    fn write_temp(&mut self, dir: &Directory, image: &[u8]) -> Result<Written> {
         self.calls.push(Call::WriteTemp {
-            path: dir.join(TEMP_NAME),
+            path: dir.path().join(TEMP_NAME),
             len: image.len(),
         });
         let out = self.inner.write_temp(dir, image)?;
@@ -424,27 +403,27 @@ impl<M: Medium> Medium for Instrumented<M> {
         Ok(out)
     }
 
-    fn rename(&mut self, synced: Synced, dir: &Path) -> Result<Renamed> {
+    fn rename(&mut self, synced: Synced, dir: &Directory) -> Result<Renamed> {
         self.calls.push(Call::Rename {
             from: synced.path.clone(),
-            to: dir.join(SNAPSHOT_NAME),
+            to: dir.path().join(SNAPSHOT_NAME),
         });
         let out = self.inner.rename(synced, dir)?;
         self.interrupt_here("rename")?;
         Ok(out)
     }
 
-    fn fsync_dir(&mut self, renamed: Renamed, dir: &Path) -> Result<()> {
+    fn fsync_dir(&mut self, renamed: Renamed, dir: &Directory) -> Result<()> {
         self.calls.push(Call::FsyncDir {
-            dir: dir.to_path_buf(),
+            dir: dir.path().to_path_buf(),
         });
         self.inner.fsync_dir(renamed, dir)?;
         self.interrupt_here("fsync_dir")
     }
 
-    fn fsync_parent(&mut self, dir: &Path) -> Result<()> {
+    fn fsync_parent(&mut self, dir: &Directory) -> Result<()> {
         self.calls.push(Call::FsyncParent {
-            dir: parent_of(dir).to_path_buf(),
+            dir: dir.parent_path().to_path_buf(),
         });
         self.inner.fsync_parent(dir)?;
         self.interrupt_here("fsync_parent")
