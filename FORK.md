@@ -366,6 +366,24 @@ that target are clean too. The shipped binary was checked against
 fails that command, which is the evidence the arm was compiled and not
 skipped. All of it is still a check.
 
+**Those five sites, counted again in this tree, 2026-10-03.** The import is
+still one, and narrower: `std::os::unix::fs::MetadataExt` alone, where it
+named `DirBuilderExt` and `OpenOptionsExt` beside it. Of the four `mode`
+calls, one remains, `meta.mode()`, beside a second metadata read the owner
+check added, `meta.uid()`, which is compared with `rustix::process::geteuid`.
+The other three set a creation mode through `std`'s builders and are gone:
+the store hardening (`2557b85`, and Rep-0's copy of it in `4e4eebe`) made
+the creation modes two `rustix::fs::Mode` constants in `keystore/perms.rs`,
+`FILE_MODE` and `DIR_MODE`, and `keystore/directory.rs` applies them in two
+places -- `mkdirat` with `DIR_MODE`, and the `openat` in `open_file` with
+`FILE_MODE`. Its four other opens are of directories that already exist,
+and pass an empty mode. Every one of those items is `cfg(unix)`, so a check
+for the Windows target meets none of them.
+`tests/invariants.rs::the_unix_surface_is_confined_to_the_files_a_port_would_touch`
+enumerates this tree's surface in nine rows, `std::os::unix` naming
+`keystore/perms.rs` alone and `rustix::` naming `keystore/directory.rs` and
+`keystore/perms.rs`.
+
 ### Two corrections to the platform statement Rep-0 makes
 
 **`flock` was never an obstacle**, though the keystore's gate named it as one.
