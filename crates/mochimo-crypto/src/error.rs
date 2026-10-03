@@ -191,6 +191,11 @@ pub enum Error {
     HeldOpen {
         code: i32,
     },
+    /// The path's last component is a symbolic link. Refused rather than
+    /// followed, so a link placed where the store is named cannot point the
+    /// wallet at another directory the operator owns; the operator passes
+    /// the directory it points to instead.
+    StoreDirectoryIsLink,
     /// A key is reserved for an unsettled spend; no further advance until
     /// `persist_settled`.
     PendingUnresolved {
@@ -613,6 +618,11 @@ impl fmt::Display for Error {
                  sharing write -- an antivirus scanner, a search indexer, a backup or sync agent. \
                  Nothing was read or changed; run the command again, and if the refusal persists, \
                  exclude the keystore directory from that program"
+            ),
+            Error::StoreDirectoryIsLink => f.write_str(
+                "keystore directory is a symbolic link; a store is never opened through one, so \
+                 that a link planted at the store's name cannot point the wallet at another \
+                 directory. Pass the directory the link points to",
             ),
             Error::PendingUnresolved { spent_index } => write!(
                 f,

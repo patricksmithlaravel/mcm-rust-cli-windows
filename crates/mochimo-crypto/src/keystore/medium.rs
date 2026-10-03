@@ -214,6 +214,20 @@ impl sealed::Sealed for Disk {}
 impl Medium for Disk {
     fn write_temp(&mut self, dir: &Directory, image: &[u8]) -> Result<Written> {
         let path = dir.path().join(TEMP_NAME);
+        // A leftover temp is UNLINKED first, then the temp is created new.
+        // The unlink is what keeps a temp left by an earlier crash from
+        // blocking every future commit; creating new rather than truncating
+        // is what keeps that leftover's mode out of the snapshot, since a
+        // mode passed to `open` applies only when the file is created and a
+        // truncated leftover carries its own permissions through the rename.
+        // `open` already unlinks a stale temp after taking the lock; doing it
+        // here too is what keeps `create`'s first commit, and every other,
+        // from depending on the caller remembering. The mode the temp is
+        // created with is `perms::FILE_MODE`, and the reason it is the same
+        // `0600` the lock file gets is argued there: since format v3 the temp
+        // is a 51-byte plaintext header over a sealed body, so a partial one
+        // leaks the KDF parameters, the salt and the nonce rather than a root
+        // -- metadata, not key material, and still nobody else's.
         dir.remove_temp(TEMP_NAME).map_err(io("write_temp unlink stale temp"))?;
         let mut file = dir.create_temp(TEMP_NAME).map_err(io("write_temp open"))?;
         file.write_all(image).map_err(io("write_temp write"))?;
@@ -232,11 +246,15 @@ impl Medium for Disk {
     }
 
     fn fsync_dir(&mut self, _renamed: Renamed, dir: &Directory) -> Result<()> {
-        // Retain File::sync_all, including Apple's full-flush behavior.
+        // `File::sync_all` on the held directory descriptor. On Apple targets
+        // std's sync_all is fcntl(F_FULLFSYNC) with no fallback; it was
+        // measured succeeding on a directory fd on APFS.
         dir.sync_all().map_err(io("fsync_dir"))
     }
 
     fn fsync_parent(&mut self, dir: &Directory) -> Result<()> {
+        // The same call as `fsync_dir`, one directory up: `sync_all` on a
+        // directory descriptor, `F_FULLFSYNC` on Apple targets.
         dir.sync_parent().map_err(io("fsync_parent"))
     }
 }

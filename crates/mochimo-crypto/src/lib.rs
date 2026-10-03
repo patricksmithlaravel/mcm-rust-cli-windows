@@ -40,7 +40,7 @@
 //!
 //! | interface | Unix | Windows |
 //! | --- | --- | --- |
-//! | the keystore's permission model, a check against another local user rather than a convenience | mode bits: the store is created `0600` and its directory `0700`, and a directory that is group- or world-writable is refused | access lists: created with a protected list granting this user alone, and a directory anyone but this user, `SYSTEM` or the Administrators group can write to is refused, as is a store file anyone but those three can read or write |
+//! | the keystore's permission model, a check against another local user rather than a convenience | mode bits and owners: the store is created `0600` and its directory `0700`, and a directory that is group- or world-writable, owned by another user or named by a symbolic link is refused | access lists: created with a protected list granting this user alone, and a directory anyone but this user, `SYSTEM` or the Administrators group can write to is refused, as is a store file anyone but those three can read or write |
 //! | where the password and the recovery phrase are read, so that neither can be piped or redirected | `/dev/tty`, by path, with echo turned off by `stty` | the console's own buffers, `CONIN$` and `CONOUT$`, by name, with echo turned off in the console mode |
 //! | entropy | `/dev/urandom` | `BCryptGenRandom`, the system-preferred generator |
 //!
@@ -106,11 +106,11 @@ compile_error!(
 compile_error!(
     "mochimo-crypto targets Unix and Windows. Three interfaces it needs have no \
      portable stand-in, and each of those platforms supplies its own: the \
-     keystore's permission model (Unix mode bits; Windows access lists), the \
-     device the password and recovery phrase are read from so that neither can \
-     be piped or redirected (the controlling terminal; the console), and the \
-     entropy source (the kernel's generator; BCryptGenRandom). This target is \
-     neither, and has none of the three here."
+     keystore's permission model (Unix mode bits and owners; Windows access \
+     lists), the device the password and recovery phrase are read from so that \
+     neither can be piped or redirected (the controlling terminal; the \
+     console), and the entropy source (the kernel's generator; \
+     BCryptGenRandom). This target is neither, and has none of the three here."
 );
 
 /// The backend seam is public **only under `raw-backend`**, the test tree's

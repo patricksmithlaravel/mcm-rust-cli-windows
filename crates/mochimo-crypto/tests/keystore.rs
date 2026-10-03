@@ -2507,9 +2507,21 @@ fn unix_store_lock_and_snapshot_symbolic_links_are_refused() {
     let alias = root.path().join("alias");
     symlink(&path, &alias).unwrap();
     for spelling in [alias.clone(), alias.join("."), alias.join("")] {
-        assert!(Keystore::open(&spelling, &keystore_harness::unlock()).is_err());
-        assert!(Keystore::create(&spelling, &keystore_harness::init()).is_err());
+        assert_eq!(Keystore::open(&spelling, &keystore_harness::unlock()).err(), Some(Error::StoreDirectoryIsLink));
+        assert_eq!(Keystore::create(&spelling, &keystore_harness::init()).err(), Some(Error::StoreDirectoryIsLink));
     }
+    // A link to an empty directory of the operator's, and a link to nothing,
+    // are refused by name as well: `create` seals no store through a link and
+    // does not report one as a missing directory.
+    let empty = root.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    for (name, target) in [("to-empty", empty.clone()), ("dangling", root.path().join("absent"))] {
+        let link = root.path().join(name);
+        symlink(&target, &link).unwrap();
+        assert_eq!(Keystore::create(&link, &keystore_harness::init()).err(), Some(Error::StoreDirectoryIsLink));
+    }
+    assert_eq!(std::fs::read_dir(&empty).unwrap().count(), 0, "a store was created through a link");
+    assert!(Error::StoreDirectoryIsLink.to_string().contains("Pass the directory the link points to"));
     for name in ["keystore.lock", "accounts.mks"] {
         let entry = path.join(name);
         let outside = root.path().join(name);
