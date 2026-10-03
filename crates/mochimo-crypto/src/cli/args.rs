@@ -263,8 +263,8 @@ impl core::fmt::Display for Usage {
 }
 
 pub const HELP: &str = "\
-mcm-wallet --dir <DIR> [--node <URL>] [--allow-plaintext-node] <command>
-mcm-wallet -h | --help | help
+tawara --dir <DIR> [--node <URL>] [--allow-plaintext-node] <command>
+tawara -h | --help | help
 
   create [--from-phrase]                   make the store and account 0. Generates a
                                            24-word phrase and shows it ONCE, or reads

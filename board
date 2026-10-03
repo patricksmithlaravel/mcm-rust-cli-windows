@@ -133,7 +133,7 @@ check() {
     # maintainer's decision to record there, not this script's to make
     # quietly. Read this row's output for warnings; the status will not.
     run "doc"                cargo doc --workspace --no-deps
-    run "build: shipped"     cargo build --features mesh-https --bin mcm-wallet
+    run "build: shipped"     cargo build --features mesh-https --bin tawara
 }
 
 # check, plus the two steps whose cost puts them at a tag rather than a commit.

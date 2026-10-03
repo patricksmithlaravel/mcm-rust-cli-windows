@@ -75,7 +75,7 @@ impl UreqTransport {
             // rather than typed, so the header cannot drift from what is
             // actually speaking. The name is the crate's and not the
             // binary's: this transport is library surface, and a dependent
-            // driving it is not `mcm-wallet`. A node reading this header
+            // driving it is not `tawara`. A node reading this header
             // learns which implementation sent the request, which is the only
             // thing a user agent is for here -- nothing in this tree, in the
             // recorded captures or in the middleware behaves differently on

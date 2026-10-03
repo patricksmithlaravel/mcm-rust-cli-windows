@@ -1,6 +1,6 @@
-//! `mcm-wallet` — the command layer.
+//! `tawara` — the command layer.
 //!
-//! The binary is `src/bin/mcm-wallet.rs`; everything it does is here, generic
+//! The binary is `src/bin/tawara.rs`; everything it does is here, generic
 //! over [`Medium`] and [`Transport`] so the tests drive every command against
 //! the scriptable chain rather than against a mock of the wallet.
 //!

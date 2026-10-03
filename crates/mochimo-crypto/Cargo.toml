@@ -288,7 +288,7 @@ windows-sys = { version = "0.61", features = [
 # `ring`'s C; the board builds and drives it in a subprocess through
 # `tests/cli.rs`'s pty harness (see the note below `required-features`).
 [[bin]]
-name = "mcm-wallet"
+name = "tawara"
 # No test target links this binary's graph, deliberately: `mesh-https` drags
 # in rustls and `ring`'s C, which the test and Miri configurations keep out. The command layer is under `native` alone and `tests/cli.rs`
 # exercises every command there against a fake transport, so what this target
@@ -298,7 +298,7 @@ name = "mcm-wallet"
 # and both defects found in this binary -- the store-before-terminal order and
 # the read-only `/dev/tty` -- are in it. So the default board builds and
 # executes it: `tests/cli.rs`'s pty harness runs `cargo build --features
-# mesh-https --bin mcm-wallet` as a subprocess and drives the result under a
+# mesh-https --bin tawara` as a subprocess and drives the result under a
 # pseudo-terminal -- the one place the board compiles any C, `ring`'s, and in a
 # subprocess. The same harness drives the rest of the remainder: argv (`--node`
 # is optional for the two commands that never dial) and the shared password

@@ -9,22 +9,23 @@ not cover.
 | --- | --- | --- |
 | **Rep-0** | this repository: the command-line wallet | Unix. Linux and macOS, as `RELEASE.md` requires |
 | **Rep-1** | a command-line wallet that also runs on Windows | Linux, macOS **and** Windows |
-| **Rep-2** | a graphical wallet | all three |
+| **Rep-2** | a graphical wallet, built on Rep-1's crate as a library | Linux, macOS, Windows, Android and iOS |
 
 **Rep-1 keeps Unix and adds Windows.** It is not a Windows port in the sense of
-a Windows-only tree: Rep-2 descends from the tri-platform result, and a Rep-1
-that dropped Linux and macOS would leave Rep-2 merging them back from Rep-0
-forever.
+a Windows-only tree: Rep-2 is built on the tri-platform result, and a Rep-1
+that dropped Linux and macOS would leave Rep-2 with no library for two of its
+platforms.
 
 ---
 
 ## The organizing principle
 
 Every structural change made downstream instead of here becomes permanent
-friction on every later fix, because every Rep-0 fix has to cross two fork
-points to reach the graphical wallet. **Phase 0's job is to shape the seams so
-both deltas are thin**, and the measure of whether it succeeded is the size of
-the Rep-0-to-Rep-1 diff, not the size of Phase 0 itself.
+friction on every later fix, because every Rep-0 fix has to cross a fork
+point to reach Rep-1, and Rep-1 is what the graphical wallet is built on.
+**Phase 0's job is to shape the seams so that delta is thin**, and the measure
+of whether it succeeded is the size of the Rep-0-to-Rep-1 diff, not the size of
+Phase 0 itself.
 
 Phase 0 changes no behaviour. Every item in it is justified on this
 repository's own terms, and where an item's larger beneficiary is downstream
@@ -196,7 +197,7 @@ and the check is what keeps that list honest rather than remembered:
 | --- | --- |
 | `keystore/perms.rs` | adds the `cfg(windows)` arm beside the mode bits |
 | `keystore/medium.rs` | the durability primitives -- `fsync_dir` above all |
-| `bin/mcm-wallet.rs` | the console device and the platform generator |
+| `bin/tawara.rs` | the console device and the platform generator |
 | `lib.rs`, `keystore/mod.rs` | the two `compile_error!` gates become a per-platform statement |
 
 `medium.rs` is in the table and not in the check, because its sites are
@@ -246,9 +247,9 @@ list of things the two trees disagree about stays knowable.
 
 #### How Rep-0 changes flow down
 
-Rep-0 is upstream and never merges from anywhere. Rep-1 merges from Rep-0;
-Rep-2 merges from Rep-0 and takes Rep-1's Windows delta as its own merge when
-it is ready. Nothing merges upward.
+Rep-0 is upstream and never merges from anywhere. Rep-1 merges from Rep-0.
+Rep-2 merges from nothing: it depends on Rep-1's crate at a pinned commit, and
+a change reaches it when it moves the pin. Nothing merges upward.
 
 **The measure of whether this is working is the size of the diff at each
 boundary**, and it is worth taking that measurement rather than assuming it:
@@ -1274,30 +1275,46 @@ unreadable sector refuses a store whose other slot is intact; and whether
 `FlushFileBuffers` reports data the cache failed to write before it was
 called.
 
-## Fork point 2 -- Rep-2
+## Fork point 2 -- Rep-2 **(not cut: Rep-2 is a dependent, decided 2026-10-03)**
 
-**Rep-2 forks from Rep-0, not from Rep-1**, as soon as Phase 0 lands, and takes
-Rep-1's Windows delta as a merge when it is ready.
+**Rep-2 is not a fork.** It is a repository of its own that holds only the
+graphical application, and it depends on `mochimo-crypto` from Rep-1 as a
+library, pinned to an exact commit. It never carries a copy of the crate -- no
+vendored tree, no `[patch]` -- so a change the application needs from the
+library is made here, flows down to Rep-1, and reaches Rep-2 when its pin moves.
 
-The reason is scheduling and nothing deeper: Phase 0 gives a graphical wallet
-everything it needs, so forking from Rep-0 lets Phase 1 and Phase 2 run at the
-same time instead of end to end. The merge is small for exactly the reason
-Phase 0 exists.
+This replaces the plan first written here: fork Rep-2 from Rep-0 as soon as
+Phase 0 landed, and take Rep-1's Windows delta as a merge when it was ready.
+Its reason was scheduling and nothing deeper -- forking from Rep-0 let Phase 1
+and Phase 2 run at the same time instead of end to end -- and the reason lapsed
+when Phase 1 finished, with Rep-1's board green on Linux, macOS and Windows. A
+fork would now buy only merges. A dependency costs none, and it holds Rep-2 to
+*What Rep-1 may not change* by construction: Rep-2 cannot change the library at
+all.
 
-It does not make Windows arrive sooner. It makes the Unix builds arrive sooner.
+**Measured before the decision, 2026-10-03, on Rep-1 at `02239c1` and on this
+tree at `38879db`.** `cargo check -p mochimo-crypto --lib` is clean on both,
+with no warnings, for `aarch64-linux-android`, `x86_64-linux-android`,
+`aarch64-apple-ios` and `aarch64-apple-ios-sim`, with default features and with
+`mesh-http`. Both platforms are `cfg(unix)`, so they compile the Unix arm: the
+held directory, `flock`, and the owner and mode checks. `mesh-https` needs a C
+compiler for the target, because `ring` builds C: the NDK's clang for Android,
+Xcode for iOS. All of it is a check. Nothing has run on either platform.
 
 ## Phase 2 -- work in Rep-2
 
 ### R2-1 -- where the graphical code lives
 
-**Outside `crates/`.** Several checks in `tests/invariants.rs` walk
-`crates/*/src` by glob -- the route scan, the panic census, the `Debug`-holder
-scan, the zeroization scan, the name-citation scan. A crate under `crates/` is
-adopted by all of them. A sibling workspace is not, and it follows the
-precedent `crates/mochimo-crypto/ui/downstream` already sets. It also lets the
-graphical workspace carry its own toolchain pin, which is what makes
-`rust-toolchain.toml`'s pin -- held there by the `trybuild` expectations -- a
-non-issue rather than a conflict.
+**In a repository of its own** (Fork point 2), where this item first said a
+sibling workspace outside `crates/`. Its reasons hold more strongly there.
+Several checks in `tests/invariants.rs` walk `crates/*/src` by glob -- the
+route scan, the panic census, the `Debug`-holder scan, the zeroization scan,
+the name-citation scan -- and a crate under `crates/` is adopted by all of
+them; a separate repository is seen by none of them, as
+`crates/mochimo-crypto/ui/downstream` is a dependent the checks do not walk.
+It carries its own toolchain pin, which is what makes `rust-toolchain.toml`'s
+pin -- held there by the `trybuild` expectations -- a non-issue rather than a
+conflict.
 
 ### R2-2 -- the toolkit
 
@@ -1313,11 +1330,25 @@ Measured against this workspace's own `deny.toml` policy, on macOS/aarch64:
 No security advisories in any of them; the failures are maintenance status and
 allow-list coverage. Windows backends will shift the counts.
 
-**egui, with `default_fonts` off.** Turning it off drops
-`epaint_default_fonts` and with it both font licences -- an `AND` of `OFL-1.1`
-and the non-standard `Ubuntu-font-1.0` -- leaving the smallest licence delta of
-the three. Immediate mode is also a direct fit for a worker thread that owns
-the wallet and a frame that renders a snapshot of it.
+**iced, decided 2026-10-03**, where this item first recommended egui with
+`default_fonts` off -- which drops `epaint_default_fonts` and with it both font
+licences, an `AND` of `OFL-1.1` and the non-standard `Ubuntu-font-1.0`, leaving
+the smallest licence delta of the three. iced's model -- state, messages,
+`update`, `view` and subscriptions -- maps onto R2-4's worker thread as
+directly as immediate mode does: commands go out as messages and values come
+back through a subscription. It carries a pure-Rust software renderer,
+`tiny-skia`, for a machine without a GPU, and 0.14 brought input-method support
+and headless, end-to-end testing. The cost against egui without its fonts is
+one licence more, `CC0-1.0`, which raises nothing, and one more crate that
+trips `unmaintained`, an entry Rep-2's own `deny.toml` takes with its reason
+(R2-3).
+
+**Rep-2 also targets Android and iOS, and iced does not officially support
+either.** On Android it runs through community work on `android-activity`, with
+Java shims for the soft keyboard and the clipboard; on iOS it is more
+experimental. So Rep-2's own plan begins with a feasibility spike on both, and
+keeps every library call in a crate with no interface dependency, so that a
+mobile shell can be replaced without touching it.
 
 **Against Tauri for a wallet:** a JavaScript runtime and an IPC bridge inside
 the process that holds the master seed, safety-bearing refusal text rendered
@@ -1328,10 +1359,9 @@ the webview is outside anything `cargo deny` can see.
 
 Any toolkit forces the first entries in `deny.toml`'s `ignore` list, which that
 file describes as a decision that belongs in a commit message with a reason.
-**Rep-0 and Rep-1 never take them.** They are taken in the graphical
-workspace's own `deny.toml`, which is a second reason to put that workspace
-outside `crates/`: the policy over the code that holds keys stays exactly as it
-is today.
+**Rep-0 and Rep-1 never take them.** They are taken in Rep-2's own
+`deny.toml`, in its own repository, so the policy over the code that holds keys
+stays exactly as it is today.
 
 ### R2-4 -- architecture
 
@@ -1397,9 +1427,30 @@ distribution.
 
 ### R2-10 -- packaging
 
-Installer, signed application bundle with notarisation, and a Linux package.
-Certificates have lead time; notarisation especially. Start that before the
-code is ready for it.
+Installer, signed application bundle with notarisation, and a Linux package;
+for mobile, an Android App Bundle and an iOS archive, each behind a store
+account. Certificates have lead time; notarisation and the store accounts
+especially. Start that before the code is ready for it.
+
+### R2-11 -- mobile
+
+Android and iOS bring three things the desktop does not, and each is a design
+item before it is a screen.
+
+**Backups restore old stores.** Android's Auto Backup and device transfer, and
+iOS's iCloud and device backups, copy an application's files by default and
+put them back later. Putting back an older store is restoring an old snapshot,
+which `README.md` says "would risk reusing a one-time key".
+The store directory is excluded from every one of them, and on the desktop the
+default location is outside the folders a sync client watches.
+
+**The operating system suspends the process.** Moving to the background drops
+the `Keystore`, as R2-5's idle timer does, so a suspended application holds
+neither the seed nor the lock.
+
+**Screens are captured.** A screen that shows a secret is marked secure on
+Android, and on iOS the content is hidden when the application goes inactive,
+so the app switcher's snapshot holds nothing.
 
 ---
 

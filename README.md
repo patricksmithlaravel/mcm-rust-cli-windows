@@ -1,10 +1,10 @@
-# mcm-wallet
+# Tawara
 
 A command-line Rust wallet for **Mochimo v3**.
 
 It manages an encrypted local keystore, derives **WOTS+ one-time** signing keys, builds and submits spends through the public Mesh API, and refuses to act on any account whose local key state and the chain disagree. That last behaviour is intentional safety, not a crash: the accounts that do reconcile keep working, and only a store in which *nothing* reconciled refuses to start.
 
-This repository is one crate (`mochimo-crypto`) and one shipped binary (`mcm-wallet`). How the wallet works in full is specified in [`docs/specification.md`](docs/specification.md). The fixture corpus under `fixtures/` is the executable form of that specification.
+This repository is one crate (`mochimo-crypto`) and one shipped binary, Tawara (`tawara`). How the wallet works in full is specified in [`docs/specification.md`](docs/specification.md). The fixture corpus under `fixtures/` is the executable form of that specification.
 
 Every action is one command that prompts (when needed), prints a report, and exits.
 
@@ -28,7 +28,7 @@ It is also why an account **fails closed** when its stored index and the Mesh di
 
 ## Requirements
 
-- **Linux, macOS and Windows** — built and tested on **Linux** and **macOS**. **On Windows the test suite passes, and the program itself has been run once, by a person, at a console**: the library's and the command layer's tests are green on a Windows runner, and one run of `mcm-wallet` at a Windows 11 console on x86-64 worked through its prompts, `Ctrl-Z`, passwords with non-ASCII characters set on macOS, and a connection to a node — [`FORK.md`](FORK.md) records both. No test runs the program on Windows, and that run was elevated, so the permission checks on an ordinary account are still unmeasured. On Windows the keystore's permission checks are access lists rather than mode bits, secrets are read from the console rather than `/dev/tty`, and a store is two files rewritten in place rather than one file replaced by a rename — see *Limits*. The BSDs have the Unix interfaces and are untested here.
+- **Linux, macOS and Windows** — built and tested on **Linux** and **macOS**. **On Windows the test suite passes, and the program itself has been run once, by a person, at a console**: the library's and the command layer's tests are green on a Windows runner, and one run of the program, then named `mcm-wallet`, at a Windows 11 console on x86-64 worked through its prompts, `Ctrl-Z`, passwords with non-ASCII characters set on macOS, and a connection to a node — [`FORK.md`](FORK.md) records both. No test runs the program on Windows, and that run was elevated, so the permission checks on an ordinary account are still unmeasured. On Windows the keystore's permission checks are access lists rather than mode bits, secrets are read from the console rather than `/dev/tty`, and a store is two files rewritten in place rather than one file replaced by a rename — see *Limits*. The BSDs have the Unix interfaces and are untested here.
 - Rust **1.89+** (see root `Cargo.toml`)
 - A normal controlling terminal — the password and the recovery phrase are read from `/dev/tty` (on Windows, the console the program runs in), never from a pipe or a redirect
 - Network access for any command that talks to a Mesh node
@@ -46,23 +46,23 @@ export PATH="$HOME/.cargo/bin:$PATH"
 The shipped binary needs TLS (`mesh-https`):
 
 ```sh
-cargo build --features mesh-https --bin mcm-wallet
+cargo build --features mesh-https --bin tawara
 ```
 
 Or run without installing:
 
 ```sh
-cargo run --features mesh-https --bin mcm-wallet -- --help
+cargo run --features mesh-https --bin tawara -- --help
 ```
 
-Everything after the `--` is passed to `mcm-wallet` itself.
+Everything after the `--` is passed to `tawara` itself.
 
 ---
 
 ## Invocation shape
 
 ```text
-mcm-wallet --dir <DIR> [--node <URL>] [--allow-plaintext-node] <command> ...
+tawara --dir <DIR> [--node <URL>] [--allow-plaintext-node] <command> ...
 ```
 
 | Flag | Required? | Meaning |
@@ -80,14 +80,14 @@ Flags take a separate token (`--dir ./my-store`), not `--dir=./my-store`.
 Replace `<DIR>` and add `--node` when needed:
 
 ```sh
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> <command>
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org <command>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> <command>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org <command>
 ```
 
-After `cargo build --features mesh-https --bin mcm-wallet` you can call the binary directly:
+After `cargo build --features mesh-https --bin tawara` you can call the binary directly:
 
 ```sh
-./target/debug/mcm-wallet --dir <DIR> --node https://api.mochimo.org balance
+./target/debug/tawara --dir <DIR> --node https://api.mochimo.org balance
 ```
 
 ---
@@ -145,7 +145,7 @@ Before reserving a key, the wallet rechecks the plan's key position, source, cha
 To empty an account in one payment, use the keyword `all` as the amount:
 
 ```text
-mcm-wallet ... send <tag> <to> all
+tawara ... send <tag> <to> all
 ```
 
 `all` is `balance − fee`, read at the moment the spend is laid out, so the change is zero. (Typing the number yourself works too — balance `1000000000` with the default fee `500` is `999999500` — but the full balance as `<amount>` always fails, because nothing is left for the fee.) Read the warning `all` prints: an emptied account reads as **not found** to the Mesh until it is paid again, so `settle`, `send` and `resign` naming it are refused and `balance` lists it as unreconciled, while every other account in the store keeps working. `submit` is the only route to a node for that account meanwhile.
@@ -189,34 +189,34 @@ The chain already saw the spend. `settle` only updates **your local store**: cle
 ### Full one-liners
 
 ```sh
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> create
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> create --from-phrase
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> address
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> address <tag>
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> address --account N
+cargo run --features mesh-https --bin tawara -- --dir <DIR> create
+cargo run --features mesh-https --bin tawara -- --dir <DIR> create --from-phrase
+cargo run --features mesh-https --bin tawara -- --dir <DIR> address
+cargo run --features mesh-https --bin tawara -- --dir <DIR> address <tag>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> address --account N
 
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org balance
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org send <tag> <to> <amount>
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org send <tag> <to1> <amount1> <to2> <amount2> <to3> <amount3>
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org send <tag> --destinations payees.txt
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org send <tag> <to> all
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org send <tag> <to> <amount> --fee N --btl N --ref TEXT
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org settle <tag>
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org resign <tag> <to> <amount>
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org resign <tag> --destinations payees.txt
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org resign <tag> <to> <amount> --fee N --btl N --ref TEXT
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org submit <artifact-hex>
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org status <tag>
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org status <tag> --scan-to M
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org reconcile <tag> --advance-to N
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org discover
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org discover --to 256
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org restore --account N
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org restore --account N --scan-to M
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org transaction <hash>
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org recent-transactions <tag> --count 10
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org block 1078535
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org blocks --count 10
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org balance
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org send <tag> <to> <amount>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org send <tag> <to1> <amount1> <to2> <amount2> <to3> <amount3>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org send <tag> --destinations payees.txt
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org send <tag> <to> all
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org send <tag> <to> <amount> --fee N --btl N --ref TEXT
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org settle <tag>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org resign <tag> <to> <amount>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org resign <tag> --destinations payees.txt
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org resign <tag> <to> <amount> --fee N --btl N --ref TEXT
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org submit <artifact-hex>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org status <tag>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org status <tag> --scan-to M
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org reconcile <tag> --advance-to N
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org discover
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org discover --to 256
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org restore --account N
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org restore --account N --scan-to M
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org transaction <hash>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org recent-transactions <tag> --count 10
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org block 1078535
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org blocks --count 10
 ```
 
 ### Command notes
@@ -273,7 +273,7 @@ Re-derives account `N` and finds its index on chain. The account must already be
 Example send (placeholders only):
 
 ```sh
-cargo run --features mesh-https --bin mcm-wallet -- --dir <DIR> --node https://api.mochimo.org send <your-base58-tag> <payee-base58> <amount-in-nanoMCM>
+cargo run --features mesh-https --bin tawara -- --dir <DIR> --node https://api.mochimo.org send <your-base58-tag> <payee-base58> <amount-in-nanoMCM>
 ```
 
 ---
@@ -353,7 +353,7 @@ export PATH="$HOME/.cargo/bin:$PATH"
 cargo build --workspace
 cargo test --workspace --no-fail-fast
 cargo clippy --workspace --all-targets -- -D warnings
-cargo build --features mesh-https --bin mcm-wallet
+cargo build --features mesh-https --bin tawara
 ```
 
 `./board check` runs the whole board in one command -- the four above and the
@@ -378,7 +378,7 @@ Features of note:
 
 - [`docs/specification.md`](docs/specification.md) — wire formats, keystore, reconciliation, Mesh client, CLI semantics
 - [`AGENT.md`](AGENT.md) — repository orientation, fixture corpus, invariants, the board
-- `mcm-wallet --help` — same command list as shipped in the binary
+- `tawara --help` — same command list as shipped in the binary
 
 ---
 
