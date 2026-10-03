@@ -1168,7 +1168,7 @@ fn resign_submits_what_it_reproduces_and_says_a_submission_is_not_a_verdict() {
 /// write the chain saw, so the log holds it, and it carries the artifact.
 ///
 /// What this cannot see is the STREAM: `cli::run` returns a `Report`, and
-/// `mcm-wallet.rs::main` puts an exit-3 report on stderr. The composition
+/// `tawara.rs::main` puts an exit-3 report on stderr. The composition
 /// -- this test's exit 3, and the pty suite's exit-3 pages landing on stderr
 /// with stdout empty -- is made directly by
 /// `pty::resign_on_a_real_pty_completes_the_recovery_send_could_not`.
@@ -3982,7 +3982,7 @@ fn the_listing_needs_no_node_and_no_seed() {
 // # What it spawns, and how it gets a terminal
 //
 // It builds the shipped binary -- `cargo build -p mochimo-crypto --features
-// mesh-https --bin mcm-wallet`, as a subprocess, exactly as the census in
+// mesh-https --bin tawara`, as a subprocess, exactly as the census in
 // `invariants.rs` spawns `cargo test --no-run` -- and runs it under
 // `script(1)`, which allocates a pseudo-terminal, makes it the child's
 // controlling terminal, forwards its own stdin into the pty and its own stdout
@@ -4079,7 +4079,7 @@ mod pty {
                 "--features",
                 "mesh-https",
                 "--bin",
-                "mcm-wallet",
+                "tawara",
                 "--message-format=json",
             ]);
             if release {
@@ -4116,10 +4116,10 @@ mod pty {
             }
             let out = cmd
                 .output()
-                .unwrap_or_else(|e| panic!("could not run `{cargo} build --bin mcm-wallet`: {e}"));
+                .unwrap_or_else(|e| panic!("could not run `{cargo} build --bin tawara`: {e}"));
             assert!(
                 out.status.success(),
-                "`cargo build --features mesh-https --bin mcm-wallet` failed ({}), so the pty \
+                "`cargo build --features mesh-https --bin tawara` failed ({}), so the pty \
                  harness has no subject. This is a build failure of the shipped binary, not a \
                  finding about its terminal handling.\n{}",
                 out.status,
@@ -4130,7 +4130,7 @@ mod pty {
                 let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
                     continue;
                 };
-                if v["reason"] != "compiler-artifact" || v["target"]["name"] != "mcm-wallet" {
+                if v["reason"] != "compiler-artifact" || v["target"]["name"] != "tawara" {
                     continue;
                 }
                 let is_bin = v["target"]["kind"]
@@ -4145,9 +4145,9 @@ mod pty {
             }
             let exe = exe.unwrap_or_else(|| {
                 panic!(
-                    "cargo built without reporting an executable for the `mcm-wallet` bin \
+                    "cargo built without reporting an executable for the `tawara` bin \
                      target. The harness reads the path from cargo's own JSON rather than \
-                     guessing `target/debug/mcm-wallet`, so a renamed target or a moved target \
+                     guessing `target/debug/tawara`, so a renamed target or a moved target \
                      directory fails here rather than running a stale binary."
                 )
             });
@@ -4237,7 +4237,7 @@ mod pty {
     }
 
     impl Session {
-        /// Spawn `mcm-wallet args...` under a pty, with its own stdout and
+        /// Spawn `tawara args...` under a pty, with its own stdout and
         /// stderr redirected to files inside `io`.
         pub fn spawn(io: &Path, args: &[&str]) -> Session {
             std::fs::create_dir_all(io).unwrap_or_else(|e| panic!("cannot create {}: {e}", io.display()));
@@ -6117,7 +6117,7 @@ fn p10_signed_transaction_of(body_hex: &str) -> Option<String> {
 /// yields the unsigned type -- so a verb needs a re-verifying
 /// `SignedTransaction::from_wire` or a `MeshClient::submit_wire`; and
 /// `needs_node`, `HELP`, the nine-verb table in this file and the two "nine
-/// verbs" comments (`mcm-wallet.rs::run_from_argv`, the pty malformed-node
+/// verbs" comments (`tawara.rs::run_from_argv`, the pty malformed-node
 /// test) all move with a tenth verb. (Corrected: this said "the pty ledger floor"
 /// until the rename; that floor counts nine COMMANDS inside one pty test,
 /// not verbs, and does not move.)

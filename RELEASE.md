@@ -267,16 +267,19 @@ user's profile rather than into the runner's workspace, why it uses no
 actions, and why its images are `-latest`. Rep-0 carries its Linux and
 macOS half, made from this one; this copy is that file with Windows added.
 
-**Rep-0's runs of its copy.** They came down with Rep-0's merge; this
+**Rep-0's runs of its copy.** They came down with Rep-0's merges; this
 fork's own runs are `FORK.md`'s, under R1-6. Each figure is summed from that
-job's own seventeen result lines, read with `gh run view --repo
-patricksmithlaravel/mcm-rust-cli-wallet --job <job> --log`, and each host is
-the one that job printed. Like the record below, a row is never edited.
+job's own result lines -- seventeen in the first two runs, eighteen from the
+third -- read with `gh run view --repo patricksmithlaravel/mcm-rust-cli-wallet
+--job <job> --log`, or for the third from the same job log through GitHub's
+API, and each host is the one that job printed. Like the record below, a row
+is never edited.
 
 | run | commit | Linux `check` | macOS `check` | `msrv`, Linux and macOS |
 | --- | --- | --- | --- | --- |
 | 36213678705 | `b293a6d` | green, 395 passed; `ubuntu24` 20260920.314.1, Linux 6.17.0-1022-azure x86_64, rustc 1.98.0 | green, 395 passed; `macos26` 20260907.0351.1, Darwin 25.6.0 arm64, rustc 1.98.0 | green on both: 1.89.0, read from `"1.89"`, both commands exit 0 |
 | 36216653269 | `da9ed86` | green, 395 passed; `ubuntu24` 20260920.314.1, Linux 6.17.0-1022-azure x86_64, rustc 1.98.0 | green, 395 passed; `macos26` 20260907.0351.1, Darwin 25.6.0 arm64, rustc 1.98.0 | green on both: 1.89.0, read from `"1.89"`, both commands exit 0 |
+| 37146519899 | `2f57e5a` | green, 407 passed; `ubuntu24` 20260927.320.1, Linux 6.17.0-1022-azure x86_64, rustc 1.98.0 | green, 407 passed; `macos26` 20260907.0351.1, Darwin 25.6.0 arm64, rustc 1.98.0 | green on both: 1.89.0, read from `"1.89"`, both commands exit 0 |
 
 The first run, on 2026-09-26, is of the commit that added the workflow. The
 push of `linux-gate` that carried it started no run, as the trigger says, and
@@ -295,6 +298,18 @@ started by the push of `board/release-1.1.0` on its own. Its Linux job,
 `msrv` jobs are the MSRV box's evidence on both platforms. The per-target
 figures are the first run's, on both runners, and the eighteen `pty::` tests
 passed on each again.
+
+The third, on 2026-10-03, is of `2f57e5a`, the commit 2.0.0 verifies,
+dispatched from the Actions tab now that the workflow is on the default
+branch. Its Linux job, 111271488238, is the `check` part of the record's
+`linux` row below; its `msrv` jobs, 111271487915 and 111271488211, are the MSRV
+box's evidence on both platforms. Both board jobs passed the same figure per
+target as each other and as the release's own Linux host: lib 46, cli 114,
+compile_fail 1, derive 10, invariants 70, kat 18, keystore 38,
+keystore_fifo 1, mesh 13, mesh_http 10, miri 2, net 3, recon 38, signing 17,
+spend 19, txwire 3, wots_internals 4, doc-tests 0. The eighteen `pty::` tests
+passed on each. Its macOS job, 111271488101, is green and, as above, no part
+of the `macos` row.
 
 ## What this checklist does not reach
 
@@ -374,6 +389,8 @@ red, the row says red and a later row says green.
 | 2026-09-27 | `06b38b0` | macos | macOS 26.6.2 (25G83), Darwin 25.6.0 arm64 | 1.98.0 (88d9e12ae 2026-08-18); nightly 1.100.0 (fd7ed57df 2026-08-29) | green, run whole on this repository's macOS host: check 403 passed, 0 failed, 0 ignored; `cargo deny check` advisories, bans, licenses and sources ok; Miri 61 passed, 0 failed, 0 ignored, in 6 h 18 m 58 s beside the `linux` and `windows` rows'; 6 h 24 m 53 s in all | patricksmithlaravel |
 | 2026-09-27 | `06b38b0` | linux | Linux 6.17.0-1022-azure x86_64, `ubuntu24` 20260920.314.1 | 1.98.0 on the runner; nightly 1.100.0 (fd7ed57df 2026-08-29) on the macOS host | green, assembled: `./board check` in workflow run 36298674909, job 108562140195, 403 passed, 0 failed, 0 ignored; `cargo deny check` on the macOS host, the `macos` row's run; Miri for `x86_64-unknown-linux-gnu` on the macOS host, MIRIFLAGS unset, 61 passed, 0 failed, 0 ignored, in 6 h 18 m 55 s beside the `macos` and `windows` rows' | patricksmithlaravel |
 | 2026-09-27 | `06b38b0` | windows | Windows 10.0.26100 x86_64, `win25-vs2026` 20260922.246.2 | 1.98.0 on the runner; nightly 1.100.0 (fd7ed57df 2026-08-29) on the macOS host | green, assembled: `./board check` in workflow run 36298674909, job 108562140192, 388 passed, 0 failed, 0 ignored, the power-loss gate's I3 and I2 proofs among them; `cargo deny check` on the macOS host, the `macos` row's run; Miri for `x86_64-pc-windows-msvc` on the macOS host, MIRIFLAGS unset, 61 passed, 0 failed, 0 ignored, in 6 h 18 m 13 s beside the `macos` and `linux` rows' | patricksmithlaravel |
+| 2026-10-03 | `2f57e5a` | linux | Linux 6.18.44-fc-v64 x86_64; and `ubuntu24` 20260927.320.1, Linux 6.17.0-1022-azure x86_64 | 1.98.0 (88d9e12ae 2026-08-18); no nightly, Miri not run | **not green: Miri not run.** Two of its three parts: `./board check` on an x86_64 Linux host, 407 passed, 0 failed, 0 ignored, and in workflow run 37146519899, job 111271488238, the same; `cargo deny check` on that host, cargo-deny 0.20.2, advisories, bans, licenses and sources ok. Miri for `x86_64-unknown-linux-gnu` was not run | patricksmithlaravel |
+| 2026-10-03 | `2f57e5a` | macos | -- | -- | **not run.** No macOS host ran `./board verify` at this commit. The workflow's macOS `check` job, 111271488101, is green, 407 passed, on `macos26` 20260907.0351.1, Darwin 25.6.0 arm64, and is no part of this row | patricksmithlaravel |
 
 `platform` is `linux`, `macos` or `windows`. `toolchain` is the stable version the board
 ran on and the nightly Miri ran on, since the `compile_fail` target pins
@@ -387,10 +404,17 @@ kernel` is then the host `./board check` ran on, and its `./board verify`
 cell names each part and where it ran: the check by its host or its
 workflow run, `cargo deny` by its host, and Miri by its host and target.
 
-The two rows at `da9ed86` are Rep-0's, verifying its tree for its 1.1.0.
-They came down with its merge, as every row of its record will, and they
-verify no commit of this fork's, which carries Windows' code besides; this
-fork's rows are appended at its own release.
+The two rows at `da9ed86` and the two at `2f57e5a` are Rep-0's, verifying
+its tree for its 1.1.0 and its 2.0.0. They came down with its merges, as
+every row of its record will, and they verify no commit of this fork's, which
+carries Windows' code besides; this fork's rows are appended at its own
+release.
+
+Rep-0 tagged 2.0.0 with neither of its rows at `2f57e5a` green, by the
+owner's decision on 2026-10-03: its `linux` row lacks its Miri part, and its
+`macos` row was not run. Rep-0's `RELEASE.md` records what that tag rests on
+and what it does not. The exception is Rep-0's, made for Rep-0's tag, and
+changes nothing here.
 
 A tag needs one green `linux` row, one green `macos` row and one green
 `windows` row at the commit verified, appended by the commit tagged. Rows

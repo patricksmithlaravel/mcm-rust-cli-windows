@@ -1,4 +1,4 @@
-//! `mcm-wallet` — the binary.
+//! `tawara` — the binary.
 //!
 //! Thin on purpose: parse argv, get the seed if the store needs one, build the
 //! transport, hand off to [`mochimo_crypto::cli::run`], print, exit. Every
@@ -19,7 +19,7 @@
 //! keep out. The command layer is under `native` alone and the tests run
 //! there. **The default board does build and execute this binary** --
 //! `tests/cli.rs`'s pty harness spawns `cargo build --features mesh-https
-//! --bin mcm-wallet` as a subprocess and drives the result under a
+//! --bin tawara` as a subprocess and drives the result under a
 //! pseudo-terminal -- in the one configuration that compiles any C, `ring`'s,
 //! and in a subprocess.
 //!
@@ -365,7 +365,7 @@ impl Transport for Node {
 /// Both callers read through [`Tty`]'s own `read_secret_line`, on a terminal
 /// from the same [`open_terminal`], and that is what keeps a prompt attached
 /// to the question it asks. A second copy writing prompts with `eprint!`
-/// would put them on stderr, where `mcm-wallet ... balance 2>/dev/null`
+/// would put them on stderr, where `tawara ... balance 2>/dev/null`
 /// separates the prompt from what it asks about and the operator waits at a
 /// silent screen -- the read-only-descriptor defect reached by redirection
 /// rather than by a dead descriptor.
@@ -696,7 +696,7 @@ impl create_cmd::Terminal for Tty {
     /// It was `println!` once, and that quietly falsified two things at
     /// once. `/dev/tty` was acquired precisely so a phrase could not reach
     /// *"whatever captured stdout"* (in as many words) — and then the
-    /// display went to stdout anyway, so `mcm-wallet ... create > seed.txt`
+    /// display went to stdout anyway, so `tawara ... create > seed.txt`
     /// wrote the twenty-four words into a plaintext file, which is the exact
     /// exposure `create`'s module doc enumerates. And the confirmation prompt
     /// goes to stderr, so under any redirection the operator was asked to read

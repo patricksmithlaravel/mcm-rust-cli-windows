@@ -2083,8 +2083,8 @@ fn key_signs_once_per_keystore_with_the_raw_signer_crate_private_not_absent() {
 ///   and effective user ID used to check the opened directory's owner.
 /// * `std::os::windows` and `windows_sys` -- `keystore/perms/windows.rs`, the
 ///   Windows permission model and the slot files' opening and creation; and
-///   `bin/mcm-wallet.rs`, the console and the generator.
-/// * `/dev/` and `"stty"` -- `bin/mcm-wallet.rs`. The library reaches neither:
+///   `bin/tawara.rs`, the console and the generator.
+/// * `/dev/` and `"stty"` -- `bin/tawara.rs`. The library reaches neither:
 ///   entropy is a parameter and the prompts go through `cli::create::Terminal`.
 /// * `cfg(unix)` and `cfg(windows)` -- the files holding a per-platform arm.
 ///   `medium.rs` selects the Unix primitives over a retained directory or the
@@ -2119,7 +2119,7 @@ fn the_unix_surface_is_confined_to_the_files_a_port_would_touch() {
     const PERMS_WINDOWS: &str = "crates/mochimo-crypto/src/keystore/perms/windows.rs";
     const MEDIUM: &str = "crates/mochimo-crypto/src/keystore/medium.rs";
     const ERROR: &str = "crates/mochimo-crypto/src/error.rs";
-    const BIN: &str = "crates/mochimo-crypto/src/bin/mcm-wallet.rs";
+    const BIN: &str = "crates/mochimo-crypto/src/bin/tawara.rs";
     const LIB: &str = "crates/mochimo-crypto/src/lib.rs";
     const KEYSTORE: &str = "crates/mochimo-crypto/src/keystore/mod.rs";
     const SURFACE: [(&str, &[&str]); 9] = [
@@ -10212,7 +10212,7 @@ fn unsafe_is_confined_to_declared_files() {
             None,
         ),
         (
-            "crates/mochimo-crypto/src/bin/mcm-wallet.rs",
+            "crates/mochimo-crypto/src/bin/tawara.rs",
             "the binary's Windows console and generator, in its `console` module",
             Some("console"),
         ),
@@ -11763,24 +11763,24 @@ fn the_cli_cannot_reach_around_the_wallet() {
     let files: Vec<(String, String)> = crate_source_files()
         .into_iter()
         .filter(|(p, _)| {
-            p.contains("mochimo-crypto/src/cli/") || p.ends_with("src/bin/mcm-wallet.rs")
+            p.contains("mochimo-crypto/src/cli/") || p.ends_with("src/bin/tawara.rs")
         })
         .collect();
     assert!(
         files.len() >= 4,
         "the CLI walk found {} file(s); it should find src/cli/{{mod,args,restore}}.rs and \
-         src/bin/mcm-wallet.rs. A vacuous walk passes every arm below.",
+         src/bin/tawara.rs. A vacuous walk passes every arm below.",
         files.len()
     );
     // The floor above is satisfied by `src/cli/` alone -- five files -- so
     // without this the binary's three arms below (the impl print ban, the
     // census demand, the main-only ban) are asserted over nothing if the
-    // walk misses `mcm-wallet.rs`. Found by a refutation panel, missed by
+    // walk misses `tawara.rs`. Found by a refutation panel, missed by
     // its nine reviewers and by every session before it.
     assert_eq!(
-        files.iter().filter(|(p, _)| p.ends_with("src/bin/mcm-wallet.rs")).count(),
+        files.iter().filter(|(p, _)| p.ends_with("src/bin/tawara.rs")).count(),
         1,
-        "the CLI walk did not reach src/bin/mcm-wallet.rs; every arm scoped to the binary \
+        "the CLI walk did not reach src/bin/tawara.rs; every arm scoped to the binary \
          below is then a verdict over nothing."
     );
 
@@ -11903,7 +11903,7 @@ fn the_cli_cannot_reach_around_the_wallet() {
         //
         // The create path acquired `/dev/tty` so the phrase could not reach *"whatever
         // captured stdout"*, and then `Tty::show` was `println!`, which sends
-        // it to exactly that. `mcm-wallet ... create > seed.txt` therefore
+        // it to exactly that. `tawara ... create > seed.txt` therefore
         // wrote the twenty-four words into a plaintext file while the
         // confirmation prompt went to stderr -- so the operator was asked to
         // read back words from a screen that had never shown them, and the
@@ -11912,7 +11912,7 @@ fn the_cli_cannot_reach_around_the_wallet() {
         // reached. The property is that the display goes to the acquired
         // descriptor; the check is that nothing in the impl can reach a
         // process-wide stream instead.
-        if path.ends_with("src/bin/mcm-wallet.rs") {
+        if path.ends_with("src/bin/tawara.rs") {
             let block = impl_block(&code, "impl create_cmd::Terminal for Tty");
             assert!(
                 block.len() > 200,
@@ -12097,7 +12097,7 @@ fn the_cli_cannot_reach_around_the_wallet() {
     // that forbids nothing (the direction nobody tests).
     let find = |needle: &str| -> bool {
         all.iter()
-            .any(|(p, t)| !p.contains("/cli/") && !p.ends_with("mcm-wallet.rs") && code_only(t).contains(needle))
+            .any(|(p, t)| !p.contains("/cli/") && !p.ends_with("tawara.rs") && code_only(t).contains(needle))
     };
     for (needle, _) in FORBIDDEN {
         assert!(
