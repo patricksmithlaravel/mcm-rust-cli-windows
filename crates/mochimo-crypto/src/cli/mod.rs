@@ -1334,12 +1334,19 @@ fn stamp(ms: i64) -> String {
 
 /// External text stays on its own display line and cannot control the terminal.
 /// Program-owned newlines and indentation are added by each caller.
+///
+/// Four kinds of character are written as escapes: controls; the
+/// bidirectional formatting characters, which reorder what follows them; the
+/// characters that render with no width, which make two different strings
+/// look the same; and the backslash itself, so that every escape on the page
+/// is one this function wrote, and a node cannot send text that only looks
+/// like one.
 fn terminal_text(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for ch in value.chars() {
-        if ch.is_control()
-            || matches!(ch, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}')
-        {
+        let bidi = matches!(ch, '\u{061c}' | '\u{200e}' | '\u{200f}' | '\u{2028}'..='\u{202e}' | '\u{2066}'..='\u{2069}');
+        let zero_width = matches!(ch, '\u{00ad}' | '\u{180e}' | '\u{200b}'..='\u{200d}' | '\u{2060}'..='\u{2064}' | '\u{feff}');
+        if ch.is_control() || bidi || zero_width || ch == '\\' {
             out.extend(ch.escape_default());
         } else {
             out.push(ch);
