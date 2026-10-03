@@ -6810,6 +6810,9 @@ fn transaction_escapes_every_external_text_field() {
     for code in (0..=0x1f).chain(0x7f..=0x9f).chain([
         0x061c, 0x200e, 0x200f, 0x2028, 0x2029, 0x202a, 0x202b, 0x202c, 0x202d, 0x202e,
         0x2066, 0x2067, 0x2068, 0x2069,
+        // Zero-width: soft hyphen, Mongolian vowel separator, ZWSP, ZWNJ, ZWJ,
+        // word joiner and the invisible operators, and the byte-order mark.
+        0x00ad, 0x180e, 0x200b, 0x200c, 0x200d, 0x2060, 0x2061, 0x2062, 0x2063, 0x2064, 0xfeff,
     ]) {
         controls.push(char::from_u32(code).unwrap_or_else(|| panic!("invalid test character")));
     }
@@ -6819,7 +6822,9 @@ fn transaction_escapes_every_external_text_field() {
     // Both fixed-width branches must also treat malformed addresses as text.
     row["operations"][1]["account"]["address"] = json!(format!("{}\u{9b}", "a".repeat(38)));
     row["operations"][2]["account"]["address"] = json!(format!("{}\u{9b}", "b".repeat(78)));
-    row["metadata"] = json!({"key\u{202e}": "value\u{2066}end\u{2069}\u{7}"});
+    // A literal backslash is escaped too, so text a node sends cannot pass
+    // for an escape this renderer wrote.
+    row["metadata"] = json!({"key\u{202e}": "value\u{2066}end\u{2069}\u{7}", "lookalike": r"C:\u{1b}"});
     let body = json!({"transactions": [row], "total_count": 1});
     let cmd = Command::LookupTransaction { hash: [0x18; 32] };
     let report = render_explorer_reply("/search/transactions", &body, &cmd);
@@ -6833,6 +6838,8 @@ fn transaction_escapes_every_external_text_field() {
         r"memo café 東京\u{0}",
         r"\t\n\u{b}",
         r"key\u{202e} = value\u{2066}end\u{2069}\u{7}",
+        r"lookalike = C:\\u{1b}",
+        r"\u{ad}\u{180e}\u{200b}\u{200c}\u{200d}\u{2060}\u{2061}\u{2062}\u{2063}\u{2064}\u{feff}",
     ] {
         assert!(report.text.contains(visible), "missing escaped field {visible:?}");
     }

@@ -31,6 +31,65 @@
 //! linked and loaded on every board run. But no test completes a handshake,
 //! so nothing here exercises that stack against a peer.
 //!
+//! # What the keystore's directory handle adds, on every Unix build
+//!
+//! On Unix, `keystore`'s store directory is held open through `rustix`, and
+//! that is compiled into every build there, not only the binary's: a dependent
+//! that never turns on `mesh-https` links it, and so does every test target.
+//! On Linux it
+//! brings `rustix`, `linux-raw-sys` and `bitflags`; on macOS `rustix`, `errno`
+//! and `bitflags` over `libc`, which `cpufeatures` already brings on Apple
+//! silicon and which is new on an Intel Mac. Counted as the figures above are
+//! -- every occurrence of the word in each crate's sources -- the current
+//! lockfile's `linux-raw-sys` carries 6,932 `unsafe` occurrences, `rustix`
+//! 1,660, `libc` 676, `errno` 12 and `bitflags` 3. The two largest
+//! figures overstate what one build compiles: `linux-raw-sys` is
+//! generated bindings for some twenty architectures at about 340 occurrences
+//! each (345 for x86_64), and `rustix` splits 697 in its Linux system-call
+//! backend from 486 in its `libc` backend, of which a build compiles one.
+//! These too are figures read off one lockfile, this tree's, which pins the
+//! versions Rep-0's does and gives the same counts; re-measure them rather
+//! than carrying them forward.
+//!
+//! **Where that `unsafe` is.** `rustix`'s Linux backend makes its system
+//! calls in inline assembly, which is where most of its `unsafe` sits, and
+//! `linux-raw-sys` is the kernel's types and constants, most of its `unsafe`
+//! the accessors its generator writes for them. Neither parses input from the
+//! network: what this crate hands them is the path the operator named, the
+//! fixed names of the store's own files, and descriptors it opened itself.
+//!
+//! # What it adds on Windows
+//!
+//! A Windows build compiles no `rustix`, which is a `cfg(unix)` dependency.
+//! The store directory there is `keystore::perms`'s Windows arm, over
+//! `windows-sys` 0.61 and the one crate beneath it, `windows-link`; nothing
+//! else in that target's graph is there for it. Counted the same way,
+//! `windows-sys` carries 12,530 `unsafe` occurrences and `windows-link` none.
+//! That figure overstates what a build compiles by far more than
+//! `linux-raw-sys`'s does, because `windows-sys` compiles only the features
+//! its dependents name. The six the permission model asks for --
+//! `Win32_Foundation`, `Win32_Security`, `Win32_Security_Authorization`,
+//! `Win32_Storage_FileSystem`, `Win32_System_SystemServices` and
+//! `Win32_System_Threading` -- carry 452, and the crate's `core` module, which
+//! every feature set compiles, 6 more. The binary's two, `Win32_System_Console`
+//! and `Win32_Security_Cryptography`, are in the library's dependency line
+//! too, a `[[bin]]` having no dependency table of its own, so every Windows
+//! build compiles them as well: 632 more, 1,090 in all.
+//!
+//! **Where that `unsafe` is, and where the calls are.** Of the permission
+//! model's 452, 393 are `unsafe { core::mem::zeroed() }` in the `Default` the
+//! generator writes for each structure, and 59 are function-pointer types
+//! declared `unsafe extern "system"`. The functions themselves are declared
+//! through `windows-link`'s `link!`, which writes no `unsafe` of its own, and
+//! nothing in either crate calls one. The calls are made in this crate, in
+//! `keystore/perms/windows.rs`: 19 `unsafe` blocks, 22 occurrences of the word
+//! counted as above, and the first row of
+//! `tests/invariants.rs::unsafe_is_confined_to_declared_files`, which argues
+//! why the boundary is there. What they are handed is the path the operator
+//! named, the fixed names of the store's files, and buffers and handles this
+//! crate allocated or the system returned into them; none of it is input
+//! from the network.
+//!
 //! # The platforms, and the three interfaces each supplies
 //!
 //! This crate targets **Unix and Windows**, and is built and tested on Linux
