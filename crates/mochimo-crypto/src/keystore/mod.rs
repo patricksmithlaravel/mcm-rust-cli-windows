@@ -140,9 +140,13 @@
 //!
 //! # What `open` refuses, and why
 //!
-//! A directory owned by another user or writable by group/others. Unix
-//! checks the opened directory and keeps it for every subsequent operation;
-//! no-follow opens refuse symbolic links for the store, lock and snapshot.
+//! A directory owned by another user or writable by group/others. On Unix
+//! the check is asked of the opened directory, which is kept for every
+//! subsequent operation; why the owner is asked before the mode is argued in
+//! `perms`. A store directory named by a **symbolic link** is refused there
+//! as [`Error::StoreDirectoryIsLink`] rather than followed, and `directory`
+//! says what that keeps a link from doing; the lock and the snapshot are
+//! opened without following a link and must be regular files.
 //! A **missing snapshot** — an absent file is not an empty store;
 //! treating it as one is I5's index-zero assumption reached through the
 //! filesystem, so a genuinely new store goes through [`Keystore::create`]. A

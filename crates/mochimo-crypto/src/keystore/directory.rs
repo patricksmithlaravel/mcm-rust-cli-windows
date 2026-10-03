@@ -3,6 +3,20 @@
 //! Paths are retained for diagnostics only. Locking, snapshot reads, temp
 //! writes, replacement and flushes all use the same directory handle, even
 //! if an ancestor is renamed while a store is open.
+//!
+//! # Why the store directory may not be a symbolic link
+//!
+//! The owner and mode checks are asked of the directory the path reaches,
+//! and a link there would pass them whenever it points at any directory the
+//! operator owns. With a link refused as the path's last component, whoever
+//! can write the directory the store is named in can make that name only a
+//! directory of their own, which the owner check refuses, or one already
+//! beside it -- never a pointer to another of the operator's directories,
+//! such as an older copy of the store. Components above the last one keep
+//! their filesystem meaning: they are the operator's layout, and what this
+//! module guards is the store's own name. The refusal is
+//! [`Error::StoreDirectoryIsLink`], so the operator reads that the path was a
+//! link and passes the directory it points to.
 
 use std::ffi::OsStr;
 use std::fs::File;
@@ -28,6 +42,20 @@ fn io(op: &'static str) -> impl Fn(std::io::Error) -> Error {
     move |e| Error::Io { op, kind: e.kind() }
 }
 
+/// What a failed no-follow open of the store directory reports.
+///
+/// A link there fails as `ELOOP` on one platform and `ENOTDIR` on another,
+/// and neither names the cause, so the entry itself is looked at once more.
+/// The look only chooses the error: the open has already refused, and a link
+/// that appears or vanishes between the two calls changes the wording of a
+/// refusal and never what is opened.
+fn refused_open(e: rustix::io::Errno, entry: &Path) -> Error {
+    match std::fs::symlink_metadata(entry) {
+        Ok(meta) if meta.file_type().is_symlink() => Error::StoreDirectoryIsLink,
+        _ => io("stat directory")(e.into()),
+    }
+}
+
 impl Directory {
     pub(crate) fn open(path: &Path, create: bool) -> Result<Self> {
         if path.as_os_str().is_empty() {
@@ -39,7 +67,7 @@ impl Directory {
             // store itself. Parent components keep their filesystem meaning.
             let normalized: PathBuf = path.components().collect();
             let file = File::from(fs::open(&normalized, flags | OFlags::NOFOLLOW, Mode::empty())
-                .map_err(std::io::Error::from).map_err(io("stat directory"))?);
+                .map_err(|e| refused_open(e, &normalized))?);
             perms::refuse_unsafe_dir(&file)?;
             return Ok(Self {
                 file,
@@ -61,7 +89,7 @@ impl Directory {
             Err(e) => return Err(io("create directory")(e.into())),
         }
         let file = File::from(fs::openat(&parent, leaf, flags | OFlags::NOFOLLOW, Mode::empty())
-            .map_err(std::io::Error::from).map_err(io("stat directory"))?);
+            .map_err(|e| refused_open(e, &parent_path.join(leaf)))?);
         perms::refuse_unsafe_dir(&file)?;
         // For `.` and `..`, the lexical parent opened above was only a
         // lookup anchor. Flush the actual parent of the verified directory.
@@ -87,6 +115,10 @@ impl Directory {
         }
     }
 
+    /// Open an entry of the store without following a link, and refuse
+    /// anything that is not a regular file. `NONBLOCK` is what makes that
+    /// refusal reachable for a FIFO planted under a store name: without it
+    /// the open waits for a writer and the check after it never runs.
     fn open_file(&self, name: &str, flags: OFlags) -> std::io::Result<File> {
         let file = File::from(fs::openat(
             &self.file, name,
@@ -99,6 +131,14 @@ impl Directory {
         Ok(file)
     }
 
+    /// Open the lock file at [`perms::FILE_MODE`], creating it if absent and
+    /// **never** truncating it.
+    ///
+    /// Read and write are both asked for because the caller locks the
+    /// descriptor afterwards; truncation is refused because the file is a
+    /// lock and not a store, and truncating here would rewrite a file another
+    /// process may hold at exactly the moment this one is finding out whether
+    /// it does.
     pub(crate) fn open_lock(&self, name: &str) -> std::io::Result<File> {
         self.open_file(name, OFlags::RDWR | OFlags::CREATE)
     }
@@ -107,6 +147,12 @@ impl Directory {
         self.open_file(name, OFlags::RDONLY)
     }
 
+    /// Create a file at [`perms::FILE_MODE`], failing if it already exists.
+    ///
+    /// Exclusive, so a leftover cannot be opened in place: a mode passed to
+    /// `open` applies only when the file is created, and a truncated leftover
+    /// carries its own permissions through to whatever is written into it.
+    /// The caller that needs the leftover gone unlinks it first.
     pub(crate) fn create_temp(&self, name: &str) -> std::io::Result<File> {
         self.open_file(name, OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL)
     }

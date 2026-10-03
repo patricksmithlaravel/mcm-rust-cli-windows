@@ -336,7 +336,7 @@ pub(crate) fn create_private_dir(dir: &Path) -> io::Result<()> {
 /// control, failing if it already exists, held for reading and writing and
 /// shared for reading alone.
 ///
-/// Where the Unix arm has `create_private_file` for the temp a rename
+/// Where the Unix arm has `Directory::create_temp` for the temp a rename
 /// replaces the snapshot with, this arm has the slot files the layout writes
 /// in place, and no temp. `CREATE_NEW`, and `FILE_FLAG_OPEN_REPARSE_POINT`
 /// because that is what `std` adds for `create_new` -- a link at the path is
