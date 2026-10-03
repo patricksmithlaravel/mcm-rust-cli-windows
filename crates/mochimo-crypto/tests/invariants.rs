@@ -2064,7 +2064,7 @@ fn key_signs_once_per_keystore_with_the_raw_signer_crate_private_not_absent() {
     );
 }
 
-/// **The platform surface is the files the port touched, and no others.**
+/// **Direct platform APIs and platform gates have a declared boundary.**
 ///
 /// This crate builds for Unix and for Windows and refuses every other target,
 /// in `lib.rs` and again in `keystore`. Each platform supplies the three
@@ -2078,32 +2078,36 @@ fn key_signs_once_per_keystore_with_the_raw_signer_crate_private_not_absent() {
 /// site, over comment-stripped code:
 ///
 /// * `std::os::unix` -- `keystore/perms.rs`, the Unix permission model.
+/// * `rustix::` -- `keystore/directory.rs`, the retained directory handle and
+///   its directory-relative operations; and `keystore/perms.rs`, the modes
+///   and effective user ID used to check the opened directory's owner.
 /// * `std::os::windows` and `windows_sys` -- `keystore/perms/windows.rs`, the
 ///   Windows permission model and the slot files' opening and creation; and
 ///   `bin/mcm-wallet.rs`, the console and the generator.
 /// * `/dev/` and `"stty"` -- `bin/mcm-wallet.rs`. The library reaches neither:
 ///   entropy is a parameter and the prompts go through `cli::create::Terminal`.
 /// * `cfg(unix)` and `cfg(windows)` -- the files holding a per-platform arm.
-///   `medium.rs` is here though no platform API is named in its Unix arm: its
-///   sites are `std::fs` calls that compile everywhere and behave differently,
-///   which a scan by API name cannot find, so the arm's attribute is what
-///   makes it enumerable at all; its Windows arm is the slot layout's steps.
+///   `medium.rs` selects the Unix primitives over a retained directory or the
+///   Windows slot layout. Their flushes use standard-library APIs with
+///   platform-specific durability semantics, which an API-name scan cannot
+///   distinguish; the arm's attribute makes that choice enumerable.
 ///   `keystore/mod.rs` is here for the slot layout's reading and commit on
 ///   Windows, beside the Unix arm's, and `error.rs` for its two Windows-only
 ///   variants. `perms/windows.rs` is not, because it is gated whole at its
-///   `mod` line in `perms.rs`, and neither is `keystore/slots.rs`, which is
-///   compiled on Windows and under test everywhere and names no platform.
+///   `mod` line in `perms.rs`. Likewise `keystore/directory.rs` is gated whole
+///   in `keystore/mod.rs`; its direct calls are covered by the `rustix::` row.
+///   `keystore/slots.rs` is compiled on Windows and under test everywhere and
+///   names no platform.
 /// * `cfg(not(any(unix, windows)))` -- `lib.rs` and `keystore/mod.rs`, the two
 ///   gates that refuse every other target.
 ///
 /// # What this is for
 ///
-/// The upstream tree this one forks from is Unix-only, and its version of
-/// this check lists the four files a port would have to touch. This version
-/// lists what the port did touch, and the difference between the two is the
-/// port's footprint in the source, readable here rather than reconstructed
-/// from a diff. A file joining a row is a new place a platform decision lives,
-/// and the failure message says where it should have gone instead.
+/// A port can find direct platform dependencies and platform selections here.
+/// This does not enumerate every file a port may need to change: a call to a
+/// standard-library API can still rely on a platform's durability semantics.
+/// A file joining a row is a new place a direct platform dependency lives,
+/// and the failure message names the boundaries it should use instead.
 ///
 /// The test keeps the name it has upstream on purpose. A renamed test is a
 /// conflict at every merge that touches it, and the name still says what the
@@ -2111,14 +2115,16 @@ fn key_signs_once_per_keystore_with_the_raw_signer_crate_private_not_absent() {
 #[test]
 fn the_unix_surface_is_confined_to_the_files_a_port_would_touch() {
     const PERMS: &str = "crates/mochimo-crypto/src/keystore/perms.rs";
+    const DIRECTORY: &str = "crates/mochimo-crypto/src/keystore/directory.rs";
     const PERMS_WINDOWS: &str = "crates/mochimo-crypto/src/keystore/perms/windows.rs";
     const MEDIUM: &str = "crates/mochimo-crypto/src/keystore/medium.rs";
     const ERROR: &str = "crates/mochimo-crypto/src/error.rs";
     const BIN: &str = "crates/mochimo-crypto/src/bin/mcm-wallet.rs";
     const LIB: &str = "crates/mochimo-crypto/src/lib.rs";
     const KEYSTORE: &str = "crates/mochimo-crypto/src/keystore/mod.rs";
-    const SURFACE: [(&str, &[&str]); 8] = [
+    const SURFACE: [(&str, &[&str]); 9] = [
         ("std::os::unix", &[PERMS]),
+        ("rustix::", &[DIRECTORY, PERMS]),
         ("std::os::windows", &[PERMS_WINDOWS, BIN]),
         ("windows_sys", &[PERMS_WINDOWS, BIN]),
         ("/dev/", &[BIN]),
@@ -2149,8 +2155,8 @@ fn the_unix_surface_is_confined_to_the_files_a_port_would_touch() {
             "the platform surface moved: `{needle}` is named by a different set of files than \
              this check enumerates.\n  found:    {found:?}\n  expected: {want:?}\nA new file \
              here is a new place a platform decision lives. Either put the site behind \
-             `keystore::perms` (for the library) or the binary's own terminal and entropy code, \
-             or add the file to this list with the reason it cannot go in either."
+             `keystore::perms`, `keystore::directory`, or the binary's terminal and entropy code, \
+             or add the file here with the reason it needs a separate boundary."
         );
     }
 }
@@ -9573,6 +9579,29 @@ fn no_native_endian_conversions_anywhere_in_the_crate() {
 /// walk reports every row missing rather than passing over nothing.
 const DECLARED_PANIC_SITES: &[(&str, &str, usize, &str)] = &[
     (
+        "crates/mochimo-crypto/src/keystore/directory.rs",
+        ".unwrap()",
+        9,
+        "inside the test-only parent-directory durability regression: setup, \
+         descriptor inspection, flush and cleanup failures must fail the test. \
+         The production directory operations return errors.",
+    ),
+    (
+        "crates/mochimo-crypto/src/keystore/directory.rs",
+        "assert_eq!",
+        2,
+        "inside the same test-only module: compare the held parent's device \
+         and inode to the actual parent of the store, and check a parent \
+         flush is refused on a handle opened without a parent.",
+    ),
+    (
+        "crates/mochimo-crypto/src/keystore/directory.rs",
+        "assert!",
+        1,
+        "inside the same test-only module: an existing-store open retains \
+         no parent handle, so it needs no read permission on the parent.",
+    ),
+    (
         "crates/mochimo-crypto/src/backend/native.rs",
         "assert!",
         3,
@@ -13969,4 +13998,3 @@ fn no_comment_under_the_crate_narrates_its_own_development() {
         found.len()
     );
 }
-

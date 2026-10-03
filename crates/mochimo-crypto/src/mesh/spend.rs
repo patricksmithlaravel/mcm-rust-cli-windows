@@ -8,26 +8,27 @@
 //! transaction and signs whatever comes back, with no comparison to the
 //! change, amount or fee it asked for (re-derived by execution in group M).
 //! A middleware that is malicious, buggy or merely a different
-//! version chooses what that wallet signs. Here the middleware chooses
-//! nothing: [`SpendPlan::new`] lays out every byte of the signed prefix from
+//! version chooses what that wallet signs. Here [`SpendPlan::new`] lays
+//! out every byte of the signed prefix from
 //! the keystore's addresses, the caller's destinations and fee, and one
 //! observation of the chain; [`SignedTransaction::attach`] puts the
 //! keystore's signature beside it and re-validates the whole image the way
 //! the node will; the bytes sent are `wire()`, unchanged.
 //!
-//! # The one server-supplied number in the signed bytes, and why it cannot steal
+//! # The server-supplied balance and its trust boundary
 //!
-//! `change_total` is `balance − send − fee`, and the balance comes from the
-//! chain through `/call tag_resolve`. It is deliberately taken from **one**
-//! call: `/account/balance` on a tag runs the same `QueryTagResolve`
-//! (`accountBalanceHandler`, `account_handler.go`), so a second endpoint is
-//! not a second opinion, and a disagreement between the two would be a block
-//! boundary rather than evidence. What makes one call defensible is the
-//! node's own rule: `tx_val` requires `send + change + fee` to equal the
-//! ledger balance **exactly** (`EMCM_TXTOTAL`). A lied
-//! balance, high or low, makes the totals disagree with the ledger and the
-//! transaction is rejected; change goes to this wallet's own next key in
-//! either case. A wrong balance is a rejected transaction, never a theft.
+//! `change_total` is `balance - send - fee`, and the balance comes from the
+//! configured node through `/call tag_resolve`. The node's `tx_val` requires
+//! `send + change + fee` to equal the ledger balance exactly (`EMCM_TXTOTAL`).
+//! A false or stale balance therefore creates an unusable signed spend.
+//! Because its key must never sign a different digest, this can permanently
+//! lock the balance at the source address even though change names our key.
+//!
+//! `Wallet::reserve_and_sign` rechecks the balance and address immediately
+//! before reservation to catch changes since planning. Repeating a request
+//! to the same node does not authenticate it, and a payment can still arrive
+//! after that check. Use a trusted node and avoid concurrent incoming
+//! payments while a spend is outstanding; never recover by reusing a key.
 //!
 //! # What is refused before anything is reserved
 //!
@@ -53,16 +54,12 @@
 //! node consulted. The serializer's stance is unchanged: it emits the bytes
 //! given, and the rule is applied before them.
 //!
-//! Deliberately **not** enforced here: the node's *configured* fee (`Myfee`,
-//! of which only the protocol floor is knowable offline; the
-//! block-to-live window (`bnum <= btl <= bnum + 0x100`),
-//! whose bound is a literal inside `tx_val` that can neither be bound nor
-//! restated without becoming a second `valid_op` — `blk_to_live` is the
-//! caller's, zero (no expiry, the only value the node does not check) unless
-//! set; and ledger equality *at validation time*, which a payment landing
-//! between observation and validation can break — the retry is a rebuilt
-//! plan under a fresh reservation, and whether the reserved digest may be
-//! re-signed instead is the reconciliation session's decision.
+//! The plan checks only the protocol fee floor; the node's configured fee
+//! (`Myfee`) is not knowable offline. The wallet checks a non-zero
+//! block-to-live against the observed tip before reserving, but the plan
+//! itself has no tip. Neither check guarantees acceptance: the tip or
+//! ledger balance can change before validation, and a signed transaction
+//! that becomes unusable cannot safely be replaced under the reserved key.
 //!
 //! # The flow is composed by the caller
 //!
@@ -326,8 +323,8 @@ impl SpendPlan {
     /// keystore records for the reservation is the
     /// observation itself and not a value derived from three other fields;
     /// `tests/spend.rs` asserts the sum agrees, as the second degree of
-    /// freedom. The decision that added the figures named the sum; its
-    /// reason -- no second, later read of the number -- is met either way.
+    /// freedom. The wallet compares a fresh observation to this value
+    /// before reservation; it never changes the plan to match that read.
     pub fn balance(&self) -> u64 {
         self.balance
     }

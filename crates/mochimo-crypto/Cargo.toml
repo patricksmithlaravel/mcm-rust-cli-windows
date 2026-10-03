@@ -28,7 +28,7 @@ default = ["native"]
 # verdicts in group D are what a node does. The transaction ACCESSORS
 # and the CONSTRUCTION PATH -- `tx::wire` -- both work; see
 # `invariants.rs::native_transaction_path_is_checked_on_layout_not_acceptance`.
-native = ["dep:sha2", "dep:sha3", "dep:ripemd", "dep:pbkdf2", "dep:serde_json", "dep:argon2", "dep:chacha20poly1305"]
+native = ["dep:sha2", "dep:sha3", "dep:ripemd", "dep:pbkdf2", "dep:serde_json", "dep:argon2", "dep:chacha20poly1305", "dep:rustix"]
 
 # The primitive surface: makes `backend::{native, selected}` -- the raw
 # primitives, INCLUDING the raw WOTS+ signer -- nameable from outside the
@@ -401,3 +401,8 @@ quote = "1"
 # them. It affects only proc-macro2's fallback (non-proc-macro) mode, which is
 # the mode a test binary runs in, and nothing in the library links it.
 proc-macro2 = { version = "1", features = ["span-locations"] }
+
+# Directory-relative file operations keep the lock and committed state on
+# one directory identity. Safe wrappers avoid handwritten syscall bindings.
+[target.'cfg(unix)'.dependencies]
+rustix = { version = "1.1", features = ["fs", "process"], optional = true }

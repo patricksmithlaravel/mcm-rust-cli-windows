@@ -362,6 +362,25 @@ pub enum Error {
     ChainAddressMismatch {
         position: u32,
     },
+    /// The plan names a key position other than the store's current one.
+    /// Refused before a reservation is written.
+    StaleSpendPlan {
+        planned: u32,
+        stored: u32,
+    },
+    /// The plan's source or change is not the store's derived address pair.
+    SpendPlanAddressMismatch,
+    /// The ledger balance changed between planning and reservation.
+    BalanceChanged {
+        planned: u64,
+        current: u64,
+    },
+    /// A non-zero expiry cannot reach the next block or exceeds the node's
+    /// 256-block arrival window. Nothing is reserved.
+    InvalidExpiry {
+        expiry: u64,
+        tip: u64,
+    },
     /// `resign` was asked to reproduce a reservation the chain has already
     /// moved past: the ledger holds the tag at the key one position on, which
     /// is that reservation's own change key. Nothing is left to reproduce and
@@ -636,7 +655,8 @@ impl fmt::Display for Error {
             ),
             Error::DigestMismatch => f.write_str(
                 "the digest is not the one this key was reserved for; the pending record \
-                 must name what was signed, so a rebuilt transaction needs a fresh reservation",
+                 must name what was signed. Reproduce the original transaction exactly; never \
+                 reuse this key for a different transaction",
             ),
             Error::KeyAccessMismatch { kind } => write!(
                 f,
@@ -711,6 +731,25 @@ impl fmt::Display for Error {
                  three different remedies -- a broadcast spend that never settled, a restored \
                  seed with incomplete history, or a second wallet live on this seed -- so do \
                  not advance the index by hand; reconcile"
+            ),
+            Error::StaleSpendPlan { planned, stored } => write!(
+                f,
+                "the plan names key position {planned} but the store now holds {stored}; \
+                 nothing was reserved. Build a new plan from the current store"
+            ),
+            Error::SpendPlanAddressMismatch => f.write_str(
+                "the plan's source or change address does not match this store's current keys; \
+                 nothing was reserved. Build a new plan from this store",
+            ),
+            Error::BalanceChanged { planned, current } => write!(
+                f,
+                "the balance changed from {planned} to {current} nanoMCM after planning; \
+                 nothing was reserved. Review the balance and build a new plan"
+            ),
+            Error::InvalidExpiry { expiry, tip } => write!(
+                f,
+                "block-to-live {expiry} must be later than the observed tip {tip} and at most \
+                 256 blocks ahead; nothing was reserved. Use 0 for no expiry or review the tip"
             ),
             Error::ReservationLanded {
                 spent_index,
