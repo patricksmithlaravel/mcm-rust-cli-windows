@@ -252,6 +252,15 @@ fn outcome(outcome: &Outcome) -> Report {
             upgraded,
         } => sent(shipped, *send_total, *fee_total, *change_total, *upgraded),
 
+        Outcome::Planned {
+            source,
+            destinations,
+            send_total,
+            fee_total,
+            change_total,
+            blk_to_live,
+        } => planned(source, destinations, *send_total, *fee_total, *change_total, *blk_to_live),
+
         Outcome::Resigned { shipped } => resigned(shipped),
 
         Outcome::ReproducedButUnrenderable {
@@ -507,23 +516,74 @@ fn sent(
     };
     let wire_hex = hex_bytes(&s.wire);
     let mut page = format!(
-        "sending {send_total} nanoMCM to {} destination(s)\n{listed}  from   {settle_arg}\n  fee    {fee_total} total \
-         (the node's floor is {} per destination, {} here)\n  change {change_total} to your own next key \
-         under this tag\n  btl    {}\n\nCheck every destination against its payee before going \
-         further. Each is shown in the checksummed form whichever form you typed, so it can be \
-         compared character for character with what their wallet shows. They are listed in the \
-         order that goes on the wire, which the layout sorts and which need not be the order you \
-         typed.\n{}\n{}{}",
+        "sending {send_total} nanoMCM to {} destination(s)\n{}{}\n{}{}",
         s.destinations.len(),
-        crate::consts::MFEE,
-        crate::consts::MFEE.saturating_mul(u64::try_from(s.destinations.len()).unwrap_or(u64::MAX)),
-        super::block_to_live_line(s.blk_to_live),
+        laid_out(&listed, &settle_arg, s.destinations.len(), fee_total, change_total, s.blk_to_live),
         emptying,
         super::artifact_notices(&wire_hex),
         upgrade(upgraded)
     );
     let code = shipped_tail(&mut page, s, &settle_arg, super::SEND_REFUSAL);
     Report { text: page, code }
+}
+
+/// The lines a spend is checked by, from the destinations to the request to
+/// check them: what `send`'s page shows after its first line, and what the
+/// planned page shows before anything is signed. One function, so the two
+/// pages cannot list one spend in two ways.
+fn laid_out(listed: &str, settle_arg: &str, count: usize, fee_total: u64, change_total: u64, blk_to_live: u64) -> String {
+    format!(
+        "{listed}  from   {settle_arg}\n  fee    {fee_total} total (the node's floor is {} per \
+         destination, {} here)\n  change {change_total} to your own next key under this tag\n  btl    \
+         {}\n\nCheck every destination against its payee before going further. Each is shown in \
+         the checksummed form whichever form you typed, so it can be compared character for \
+         character with what their wallet shows. They are listed in the order that goes on the \
+         wire, which the layout sorts and which need not be the order you typed.\n",
+        crate::consts::MFEE,
+        crate::consts::MFEE.saturating_mul(u64::try_from(count).unwrap_or(u64::MAX)),
+        super::block_to_live_line(blk_to_live),
+    )
+}
+
+/// A spend laid out and not signed, for the person who decides whether it
+/// is: the lines [`laid_out`] gives `send`'s page, the emptying paragraph
+/// when the change is zero, and what has not happened yet. Nothing on it
+/// exists only after signing -- no artifact, no submission, no id.
+fn planned(
+    source: &crate::addr::Tag,
+    destinations: &[crate::tx::wire::Destination],
+    send_total: u64,
+    fee_total: u64,
+    change_total: u64,
+    blk_to_live: u64,
+) -> Report {
+    let settle_arg = match destination(source) {
+        Ok(d) => d,
+        Err(e) => return cannot_render(source, &e),
+    };
+    let listed = match super::destination_lines(destinations) {
+        Ok(l) => l,
+        Err((tag, e)) => return cannot_render(&tag, &e),
+    };
+    let emptying = if change_total == 0 {
+        format!(
+            "{}  Once it is signed, keep the artifact: `submit` writes it to the socket without \
+             opening the store, and is the route to a node while the account reads as not found.\n",
+            super::emptying_paragraph(&settle_arg)
+        )
+    } else {
+        String::new()
+    };
+    Report::ok(format!(
+        "NOT SIGNED: a spend of {send_total} nanoMCM to {} destination(s), laid out for you to \
+         check. Nothing has been signed yet.\n{}{emptying}\nNo key has been reserved or used, \
+         nothing has been signed, and nothing has been sent to a node. Signing reserves this \
+         spend's key first, and from then on these figures -- each destination, amount and \
+         reference, the fee and the block-to-live -- are the only spend that key will sign: \
+         signing it again later needs exactly them.",
+        destinations.len(),
+        laid_out(&listed, &settle_arg, destinations.len(), fee_total, change_total, blk_to_live),
+    ))
 }
 
 /// The reproduction page, which `resign` builds before it reaches the socket

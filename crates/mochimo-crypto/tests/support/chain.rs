@@ -28,7 +28,7 @@
 
 #![allow(dead_code)]
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::rc::Rc;
 
@@ -112,7 +112,9 @@ pub enum ChainState {
 /// how many round trips a reconciliation cost.
 pub struct Chain {
     states: RefCell<BTreeMap<Tag, ChainState>>,
-    calls: RefCell<usize>,
+    /// Behind an `Rc` for the reason `submits` is: a call that consumes the
+    /// client and hands nothing back leaves no chain to ask afterwards.
+    calls: Rc<Cell<usize>>,
     /// What `/construction/submit` echoes back, if anything.
     ///
     /// **The id is supplied by the caller, never computed here.** A test gets
@@ -152,7 +154,7 @@ impl Chain {
     pub fn new(states: &[(Tag, ChainState)]) -> Chain {
         Chain {
             states: RefCell::new(states.iter().copied().collect()),
-            calls: RefCell::new(0),
+            calls: Rc::new(Cell::new(0)),
             submit_id: RefCell::new(None),
             submit_fails: RefCell::new(false),
             submits: Rc::new(RefCell::new(Vec::new())),
@@ -164,6 +166,12 @@ impl Chain {
     /// before handing the chain to `MeshClient::new`.
     pub fn submit_log(&self) -> Rc<RefCell<Vec<Vec<u8>>>> {
         Rc::clone(&self.submits)
+    }
+
+    /// A handle to the request count that outlives the chain. Clone it
+    /// before handing the chain to `MeshClient::new`, as the submit log is.
+    pub fn call_count(&self) -> Rc<Cell<usize>> {
+        Rc::clone(&self.calls)
     }
 
     /// Script the tip `/network/status` reports.
@@ -236,13 +244,13 @@ impl Chain {
     }
 
     pub fn calls(&self) -> usize {
-        *self.calls.borrow()
+        self.calls.get()
     }
 }
 
 impl Transport for Chain {
     fn post(&self, path: &str, body: &[u8]) -> mochimo_crypto::Result<Vec<u8>> {
-        *self.calls.borrow_mut() += 1;
+        self.calls.set(self.calls.get() + 1);
         if path == "/construction/submit" {
             self.submits.borrow_mut().push(body.to_vec());
             if *self.submit_fails.borrow() {

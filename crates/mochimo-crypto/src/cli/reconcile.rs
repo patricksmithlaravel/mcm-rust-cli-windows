@@ -51,7 +51,7 @@ use crate::addr::Tag;
 use crate::consts::SEED_LEN;
 use crate::keystore::{Keystore, Medium};
 use crate::mesh::{MeshClient, Transport};
-use crate::recon::{self, AccountStatus, Divergence, OperatorAcknowledgement, ScanScope};
+use crate::recon::{self, AccountStatus, Cancel, Divergence, OperatorAcknowledgement, Progress, ScanScope, Unfinished};
 use crate::{Error, Secret};
 
 /// The diagnostic scope an invocation asks for: the default window and
@@ -62,7 +62,7 @@ use crate::{Error, Secret};
 /// — so the ceiling is one more. The parser refuses `u32::MAX`, so the add
 /// cannot overflow; `saturating_add` keeps this file free of a panicking
 /// construct regardless.
-fn scope_to(to: Option<u32>) -> ScanScope {
+pub fn scope_to(to: Option<u32>) -> ScanScope {
     match to {
         Some(m) => ScanScope::DIAGNOSTIC.with_ceiling(m.saturating_add(1)),
         None => ScanScope::DIAGNOSTIC,
@@ -131,6 +131,68 @@ pub fn advance_acknowledged<M: Medium, T: Transport>(
     master: Option<&Secret<SEED_LEN>>,
     advance_to: u32,
 ) -> core::result::Result<Reviewed, Error> {
+    // `NEVER` is never asked, so `cancelled` is never called; `Ok` is the
+    // answer that ends nothing.
+    review_asking(store, client, tag, master, advance_to, &Cancel::NEVER, None, || Ok(()))
+}
+
+/// [`advance_acknowledged`], stoppable from outside: `cancel` is asked
+/// before each account, once per position of each diagnostic walk, before
+/// the write's own re-check, and again between that re-check's match and
+/// the write itself.
+///
+/// A cancel is [`Unfinished::Cancelled`], never an [`Error`] and never a
+/// [`Reviewed`]. A walk it ends leaves a report that is true and incomplete,
+/// and an outcome decided from it would be a decision about an account made
+/// out of the caller's own stop, so the whole call answers `Cancelled`. A
+/// call that returns it wrote nothing; a cancel that arrives after the write
+/// is too late to stop it, and the call returns what it advanced.
+pub fn advance_acknowledged_with<M: Medium, T: Transport>(
+    store: &mut Keystore<M>,
+    client: &MeshClient<T>,
+    tag: &Tag,
+    master: Option<&Secret<SEED_LEN>>,
+    advance_to: u32,
+    cancel: &Cancel<'_>,
+) -> core::result::Result<Reviewed, Unfinished<Error>> {
+    review_asking(store, client, tag, master, advance_to, cancel, None, || Err(Unfinished::Cancelled))
+}
+
+/// [`advance_acknowledged_with`], telling `progress` how far it has got:
+/// before each account, every [`recon::PROGRESS_EVERY`] positions of each
+/// diagnostic walk, and again for the named account before the write's own
+/// re-check walks it a second time ([`Progress`]).
+pub fn advance_acknowledged_with_progress<M: Medium, T: Transport>(
+    store: &mut Keystore<M>,
+    client: &MeshClient<T>,
+    tag: &Tag,
+    master: Option<&Secret<SEED_LEN>>,
+    advance_to: u32,
+    cancel: &Cancel<'_>,
+    progress: &mut dyn FnMut(Progress),
+) -> core::result::Result<Reviewed, Unfinished<Error>> {
+    review_asking(store, client, tag, master, advance_to, cancel, Some(progress), || Err(Unfinished::Cancelled))
+}
+
+/// The one review the three forms run. `cancelled` is what a cancel ends the
+/// call with, and it is called only once `cancel` has said stop or a walk
+/// records that it did.
+///
+/// Eight arguments: the review's own five, and the three that say whether
+/// it may be stopped, who watches it, and what a stop returns.
+/// `clippy::result_large_err` is allowed for the walk it watches, on
+/// `recon::reconcile_account`'s ground: the error is the report.
+#[allow(clippy::too_many_arguments, clippy::result_large_err)]
+fn review_asking<M: Medium, T: Transport, E: From<Error>>(
+    store: &mut Keystore<M>,
+    client: &MeshClient<T>,
+    tag: &Tag,
+    master: Option<&Secret<SEED_LEN>>,
+    advance_to: u32,
+    cancel: &Cancel<'_>,
+    mut progress: Option<&mut dyn FnMut(Progress)>,
+    cancelled: impl Fn() -> core::result::Result<(), E>,
+) -> core::result::Result<Reviewed, E> {
     let tags = store.tags()?;
     let accounts = tags.len();
     let mut reviewed = Reviewed {
@@ -146,20 +208,39 @@ pub fn advance_acknowledged<M: Medium, T: Transport>(
     // The whole store first, the named account under the raised ceiling and
     // every other under the default scope.
     let mut named: Option<core::result::Result<AccountStatus, Divergence>> = None;
-    for t in &tags {
+    let of = u32::try_from(accounts).unwrap_or(u32::MAX);
+    // The ceiling is read only for a caller that watches: it is the one
+    // figure here that needs the store's view.
+    let watching = progress.is_some();
+    let at = |n: usize, t: &Tag, walked: &ScanScope| Progress {
+        account: u32::try_from(n).unwrap_or(u32::MAX),
+        accounts: of,
+        position: 0,
+        ceiling: match watching {
+            true => walked.reach(store.view(t).ok().flatten().map(|v| v.wots_index)),
+            false => 0,
+        },
+    };
+    for (n, t) in tags.iter().enumerate() {
+        if cancel.stop() {
+            cancelled()?;
+        }
         let this = t == tag;
+        let walked = if this { &scope } else { &ScanScope::DIAGNOSTIC };
+        let here = at(n, t, walked);
+        if let Some(report) = progress.as_deref_mut() {
+            report(here);
+        }
         let result = match recon::access_for(store, t, master) {
             Err(d) => Err(d),
-            Ok(access) => recon::reconcile_account_with(
-                store,
-                client,
-                t,
-                &access,
-                if this { &scope } else { &ScanScope::DIAGNOSTIC },
-                &recon::Cancel::NEVER,
-            ),
+            Ok(access) => recon::watched(cancel, progress.as_deref_mut(), here, |cancel| {
+                recon::reconcile_account_with(store, client, t, &access, walked, cancel)
+            }),
         };
         if let Err(d) = &result {
+            if d.stopped_by_cancel() {
+                cancelled()?;
+            }
             reviewed.reports.push(d.clone());
         }
         if this {
@@ -208,7 +289,46 @@ pub fn advance_acknowledged<M: Medium, T: Transport>(
             return Ok(reviewed);
         }
     };
-    let receipt = recon::advance_after_operator_review(store, client, tag, &access, ack, &scope, &recon::Cancel::NEVER)?;
+    if cancel.stop() {
+        cancelled()?;
+    }
+    let here = at(tags.iter().position(|t| t == tag).unwrap_or(0), tag, &scope);
+    if let Some(report) = progress.as_deref_mut() {
+        report(here);
+    }
+    // The re-check is asked once more after its walk has matched and before
+    // the write, since the walk asks before each position and not after the
+    // last: a cancel raised while that position is derived is heard there.
+    // That question asks the caller's own cancel, so it is no position of
+    // the walk and adds none to the count `watched` reports.
+    let (advanced, stopped) = recon::watched(cancel, progress, here, |counted| {
+        recon::remembered(counted, |walking| {
+            recon::guarded::advance_after_operator_review(store, client, tag, &access, ack, &scope, walking, || {
+                match cancel.stop() {
+                    true => Err(Error::Cancelled),
+                    false => Ok(()),
+                }
+            })
+        })
+    });
+    let receipt = match advanced {
+        Ok(receipt) => receipt,
+        // It reconciles once more under `scope` before it writes, and a
+        // cancel that ends that walk leaves the account unlocated, which no
+        // acknowledgement names: the refusal is the cancel's, not a finding,
+        // and nothing was written. Whether the cancel said stop is what the
+        // walk heard, remembered, and not asked again.
+        Err(Error::AcknowledgementDoesNotMatch) if stopped => {
+            cancelled()?;
+            return Err(Error::AcknowledgementDoesNotMatch.into());
+        }
+        // The question between the walk's match and the write said stop.
+        Err(Error::Cancelled) => {
+            cancelled()?;
+            return Err(Error::Cancelled.into());
+        }
+        Err(e) => return Err(e.into()),
+    };
     reviewed.outcome = Outcome::Advanced {
         index: receipt.index().get(),
     };
