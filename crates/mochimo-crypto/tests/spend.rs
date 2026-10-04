@@ -1449,6 +1449,118 @@ fn all_lays_out_the_balance_less_the_fee_and_says_the_account_is_emptied() {
     println!("  all: 5,000,000 balance, fee 500 -> sends 4,999,500 with change 0; the page names the emptied-account window and `submit`");
 }
 
+/// **A spend laid out and not signed is shown in `send`'s own lines, with the
+/// emptying paragraph when its change is zero, and with nothing only signing
+/// makes.**
+///
+/// The spend is `all` from the derived account, and `send`'s page for it is
+/// the reference. The planned page carries the same lines from the
+/// destinations to the request to check them, byte for byte, and the same
+/// emptying paragraph, and says nothing has been signed; it carries no
+/// artifact, no submission and no id. Building and rendering it reserved
+/// nothing -- the account's record and the store's generation are as they
+/// were, nothing reached the socket, and the plan still signs afterwards.
+/// The control is a spend with change, whose planned page has no emptying
+/// paragraph; and a plan from the imported account names that account as
+/// its source, since the source is read from the plan.
+#[test]
+fn a_planned_spend_shows_sends_lines_and_nothing_that_only_signing_makes() {
+    use mochimo_crypto::cli::outcome::{Decided, Outcome};
+    let master = Secret::new(DERIVED_MASTER);
+    let all = vec![Destination { tag: payee(0x6b), reference: [0; 16], amount: 4_999_500 }];
+
+    let (_sent_dir, ks) = store_holding_both_kinds("s12-planned-sent");
+    let chain = chain_holding_both(&ks);
+    chain.accepts_submit(id_for_multi("s12-planned-id", &all, MFEE));
+    let sent = cli::run(
+        ks,
+        MeshClient::new(chain),
+        &Command::Send(Spend {
+            tag: DERIVED_TAG,
+            dsts: vec![SpendTo { to: payee(0x6b), reference: [0; 16], amount: None }],
+            fee_total: MFEE,
+            blk_to_live: 0,
+        }),
+    );
+    assert_eq!(sent.code, Code::Ok, "{}", sent.text);
+
+    let (_dir, ks) = store_holding_both_kinds("s12-planned");
+    let chain = chain_holding_both(&ks);
+    let log = chain.submit_log();
+    let mut w = Wallet::open(ks, MeshClient::new(chain), Some(&master)).unwrap_or_else(|e| panic!("{e}"));
+    let plan = w
+        .plan(&DERIVED_TAG, &KeyAccess::Master(&master), all, MFEE, 0)
+        .unwrap_or_else(|e| panic!("plan: {e}"));
+    let record = w.store().view(&DERIVED_TAG).unwrap_or_else(|e| panic!("{e}"));
+    let generation = w.store().generation().unwrap_or_else(|e| panic!("{e}"));
+    let page = cli::render::render(&Decided { standing: Vec::new(), outcome: Outcome::planned(&plan) });
+    assert_eq!(page.code, Code::Ok, "{}", page.text);
+    assert!(
+        page.text.starts_with("NOT SIGNED: a spend of 4999500 nanoMCM to 1 destination(s)"),
+        "{}",
+        page.text
+    );
+    assert!(page.text.contains("Nothing has been signed yet."), "{}", page.text);
+
+    // From the line after the first to the end of the request to check.
+    let checked = |text: &str| -> String {
+        let end_mark = "need not be the order you typed.\n";
+        let start = text.find('\n').map_or(0, |i| i + 1);
+        let end = text.find(end_mark).map_or(text.len(), |i| i + end_mark.len());
+        text.get(start..end).unwrap_or("").to_string()
+    };
+    assert!(checked(&sent.text).contains("  from   "), "the reference lines were not found:\n{}", sent.text);
+    assert_eq!(checked(&page.text), checked(&sent.text), "the planned page lists the spend differently from send's");
+    let paragraph = |text: &str| -> String {
+        let start = text.find("\nTHIS EMPTIES THE ACCOUNT").unwrap_or(text.len());
+        let end_mark = "has to come from somewhere else.\n";
+        let end = text.find(end_mark).map_or(text.len(), |i| i + end_mark.len());
+        text.get(start..end).unwrap_or("").to_string()
+    };
+    assert!(!paragraph(&sent.text).is_empty(), "send's page carries no emptying paragraph:\n{}", sent.text);
+    assert_eq!(paragraph(&page.text), paragraph(&sent.text), "the planned page warns in other words than send's");
+    assert!(page.text.contains("Once it is signed, keep the artifact"), "{}", page.text);
+    for only_after_signing in ["RETRY ARTIFACT", "submitted:", "submission FAILED", "Keep the artifact below", " id "] {
+        assert!(
+            !page.text.contains(only_after_signing),
+            "the planned page carries `{only_after_signing}`, which only signing makes:\n{}",
+            page.text
+        );
+    }
+
+    assert_eq!(w.store().view(&DERIVED_TAG).unwrap_or_else(|e| panic!("{e}")), record, "planning moved the record");
+    assert_eq!(w.store().generation().unwrap_or_else(|e| panic!("{e}")), generation);
+    assert!(log.borrow().is_empty(), "planning reached the socket");
+    assert!(w.reserve_and_sign(&plan, KeyAccess::Master(&master)).is_ok(), "the plan no longer signs");
+
+    let (_change_dir, ks) = store_holding_both_kinds("s12-planned-change");
+    let chain = chain_holding_both(&ks);
+    let w = Wallet::open(ks, MeshClient::new(chain), Some(&master)).unwrap_or_else(|e| panic!("{e}"));
+    let some = vec![Destination { tag: payee(0x6b), reference: [0; 16], amount: 1_000 }];
+    let plan = w
+        .plan(&DERIVED_TAG, &KeyAccess::Master(&master), some, MFEE, 0)
+        .unwrap_or_else(|e| panic!("plan: {e}"));
+    let page = cli::render::render(&Decided { standing: Vec::new(), outcome: Outcome::planned(&plan) });
+    assert!(!page.text.contains("THIS EMPTIES"), "a spend with change is called emptying:\n{}", page.text);
+    assert!(page.text.contains("Nothing has been signed yet."), "{}", page.text);
+
+    // The source is the plan's own account. A plan from the imported account
+    // names the imported account in its `from` line, in the same store and
+    // through the same constructor, so there is no tag to pass beside it
+    // that could name another.
+    let some = vec![Destination { tag: payee(0x6b), reference: [0; 16], amount: 1_000 }];
+    let imported = w
+        .plan(&IMPORTED_TAG, &KeyAccess::StoredRoot, some, MFEE, 0)
+        .unwrap_or_else(|e| panic!("plan: {e}"));
+    let outcome = Outcome::planned(&imported);
+    assert!(matches!(outcome, Outcome::Planned { source, .. } if source == IMPORTED_TAG), "{outcome:?}");
+    let page = cli::render::render(&Decided { standing: Vec::new(), outcome });
+    for (tag, named) in [(IMPORTED_TAG, true), (DERIVED_TAG, false)] {
+        let from = format!("  from   {}\n", addr::tag_to_base58(&tag).unwrap_or_else(|e| panic!("{e}")));
+        assert_eq!(page.text.contains(&from), named, "the imported plan's page names the wrong source:\n{}", page.text);
+    }
+}
+
 /// `resign ... all` reproduces while the balance stands, because the amount
 /// is a function of a balance that has not moved.
 #[test]

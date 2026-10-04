@@ -191,7 +191,7 @@ fn cannot_render(tag: &Tag, e: &Error) -> Report {
 /// `StoredRoot` for a derived record. `access_for` returns no other
 /// divergence; the last arm names the class so a widening of it is a
 /// refusal here rather than a silent route.
-fn key_access<'a, M: Medium>(
+pub fn key_access<'a, M: Medium>(
     store: &Keystore<M>,
     tag: &Tag,
     master: Option<&'a Secret<SEED_LEN>>,
@@ -759,7 +759,22 @@ fn cmd_status<M: Medium, T: Transport>(
     master: Option<&Secret<SEED_LEN>>,
     scan_to: Option<u32>,
 ) -> Outcome {
-    match reconcile::account_status(store, client, tag, master, scan_to) {
+    status_outcome(tag, reconcile::account_status(store, client, tag, master, scan_to))
+}
+
+/// What `status` decides from one account's comparison: the
+/// [`reconcile::account_status`] result for `tag`, as the outcome
+/// [`cmd_status`] returns, so a caller that runs the comparison itself
+/// renders from the same decision.
+///
+/// In sync or in a spend state is [`Outcome::Status`]; a divergence that is
+/// an answer about the account -- an index mismatch, a reservation the chain
+/// explains at neither key, a tag the node did not resolve -- is
+/// [`Outcome::StatusDiverged`]; a tag the store does not hold is
+/// [`Outcome::NoSuchAccount`]; and a comparison that could not run is
+/// [`Outcome::StatusRefused`].
+pub fn status_outcome(tag: &Tag, compared: core::result::Result<AccountStatus, Divergence>) -> Outcome {
+    match compared {
         Ok(status) => Outcome::Status { tag: *tag, status },
         Err(Divergence::CannotReconcile {
             cause: Error::NoSuchAccount,
@@ -851,14 +866,25 @@ fn spend_destinations(s: &Spend, resolved: u64) -> Vec<Destination> {
 /// and is owed the same warning.
 fn emptying_text(settle_arg: &str) -> String {
     format!(
+        "{}  Keep the artifact below. `submit` writes it to the socket without opening the \
+         store, and is the route to a node while the account reads as not found.\n",
+        emptying_paragraph(settle_arg)
+    )
+}
+
+/// The part of [`emptying_text`] that is true before anything is signed:
+/// what a zero change does to this account and to the rest of the store.
+/// The planned page carries it with its own last sentence, since the
+/// artifact it would point at does not exist yet.
+fn emptying_paragraph(settle_arg: &str) -> String {
+    format!(
         "\nTHIS EMPTIES THE ACCOUNT. The change is zero, so nothing returns to your next key \
          under {settle_arg}.\n  The Mesh reports a tag it holds at zero balance as \"account not \
          found\", which it does not distinguish from never funded or from a failed lookup, so \
          once this lands every operation ON THIS ACCOUNT refuses until it is paid again. Other \
          accounts in this store keep working, and paying this one from another account in the \
          store is the way back. If this is the only account here, the payment has to come from \
-         somewhere else.\n  Keep the artifact below. `submit` writes it to the socket without \
-         opening the store, and is the route to a node while the account reads as not found.\n"
+         somewhere else.\n"
     )
 }
 
@@ -875,7 +901,7 @@ fn emptying_text(settle_arg: &str) -> String {
 /// and the plan are computed from the same `entry`.
 ///
 /// Without `all` this is `plan` exactly, and takes the same route.
-fn plan_spend<M: Medium, T: Transport>(
+pub fn plan_spend<M: Medium, T: Transport>(
     w: &Wallet<M, T>,
     s: &Spend,
     access: &KeyAccess<'_>,
@@ -901,7 +927,7 @@ fn plan_spend<M: Medium, T: Transport>(
 /// destination amount of zero is refused by the node's own rule, so this is
 /// reported as the insufficient balance it is rather than as a zero amount
 /// the operator never typed.
-fn spend_all_amount(balance: u64, fee_total: u64) -> Result<u64> {
+pub fn spend_all_amount(balance: u64, fee_total: u64) -> Result<u64> {
     match balance.checked_sub(fee_total) {
         Some(0) | None => Err(Error::InsufficientBalance {
             balance,
@@ -1240,7 +1266,30 @@ fn cmd_resign<M: Medium, T: Transport>(
     // this one list the same spend the same way.
     let mut listed_dsts = dsts.clone();
     listed_dsts.sort_by_key(Destination::mdst_image);
-    match w.resign_pending(&s.tag, &access, dsts, s.fee_total, s.blk_to_live) {
+    let resigned = w.resign_pending(&s.tag, &access, dsts, s.fee_total, s.blk_to_live);
+    resign_outcome(w, &s.tag, listed_dsts, s.blk_to_live, resigned)
+}
+
+/// What `resign` decides from [`Wallet::resign_pending`]'s answer, as the
+/// outcome [`cmd_resign`] returns, so a caller that re-signs through the
+/// wallet itself renders from the same decision.
+///
+/// `listed_dsts` are the destinations in the order the planner puts them on
+/// the wire, and `blk_to_live` is the one the re-sign was asked for. A
+/// reproduction is written to the socket through `w` -- unless the source
+/// tag will not render, when it is returned unwritten as
+/// [`Outcome::ReproducedButUnrenderable`]; a digest that is not the
+/// reservation's is [`Outcome::NotTheReservedSpend`]; a reservation the chain
+/// has moved past is [`Outcome::ReservationAlreadyLanded`]; and anything else
+/// is [`Outcome::Failed`].
+pub fn resign_outcome<M: Medium, T: Transport>(
+    w: &Wallet<M, T>,
+    source: &Tag,
+    listed_dsts: Vec<Destination>,
+    blk_to_live: u64,
+    resigned: Result<crate::mesh::spend::SignedTransaction>,
+) -> Outcome {
+    match resigned {
         Ok(signed) => {
             let wire = signed.wire().to_vec();
             // **Asked here and not in the renderer**, because whether the
@@ -1248,11 +1297,11 @@ fn cmd_resign<M: Medium, T: Transport>(
             // and that is not a rendering question. The reproduction goes out
             // either way: this page may be the only rendering of the only
             // bytes that can move those funds.
-            if let Err(cause) = destination(&s.tag) {
+            if let Err(cause) = destination(source) {
                 return Outcome::ReproducedButUnrenderable {
-                    source: s.tag,
+                    source: *source,
                     destinations: listed_dsts,
-                    blk_to_live: s.blk_to_live,
+                    blk_to_live,
                     wire,
                     cause,
                 };
@@ -1260,9 +1309,9 @@ fn cmd_resign<M: Medium, T: Transport>(
             let submitted = w.submit(&signed);
             Outcome::Resigned {
                 shipped: outcome::Shipped {
-                    source: s.tag,
+                    source: *source,
                     destinations: listed_dsts,
-                    blk_to_live: s.blk_to_live,
+                    blk_to_live,
                     wire,
                     submitted,
                 },
@@ -1273,7 +1322,7 @@ fn cmd_resign<M: Medium, T: Transport>(
             spent_index,
             settled_index,
         }) => Outcome::ReservationAlreadyLanded {
-            source: s.tag,
+            source: *source,
             spent_index,
             settled_index,
         },

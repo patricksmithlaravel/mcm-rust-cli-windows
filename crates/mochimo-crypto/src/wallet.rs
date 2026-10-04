@@ -82,7 +82,7 @@ use crate::error::{Error, Result};
 use crate::keystore::{KeyAccess, Keystore, Medium, SpendAddresses};
 use crate::mesh::spend::{SignedTransaction, SpendPlan};
 use crate::mesh::{MeshClient, Transport, TxId};
-use crate::recon::{self, AccountStatus, Cancel, Divergence, Reservation, ScanScope};
+use crate::recon::{self, AccountStatus, Cancel, Divergence, Progress, Reservation, ScanScope, Unfinished};
 
 /// The acknowledgement type lives in `recon` -- the CLI's `reconcile` runs
 /// before a `Wallet` exists and the gate is the acknowledgement, not this
@@ -129,6 +129,69 @@ impl fmt::Display for StartupRefusal {
         )
     }
 }
+
+/// What [`Wallet::open_or_return`] gives back when it refuses: the refusal,
+/// and the store and the client it was handed, as they were.
+///
+/// # Why the parts come back
+///
+/// `open` consumes both and drops them with its refusal, which closes the
+/// store and releases its lock. A caller that holds the password only for as
+/// long as the request that brought it cannot then open the store again
+/// without asking for the password again, though some refusals are gone at
+/// the node's next answer: a lookup that failed, a node between blocks.
+/// Handed back, the same store can be opened again as it is.
+///
+/// **This reaches around nothing.** The store is the one the caller handed
+/// in, unreconciled then and unreconciled now; no `Wallet` was built from it,
+/// so no account was confirmed and nothing that rests on the partition
+/// exists. Opening it again goes through the same constructor and the same
+/// reconciliation.
+pub struct Refused<M: Medium, T: Transport> {
+    /// Why the wallet would not start, exactly as [`Wallet::open`] reports it.
+    pub refusal: StartupRefusal,
+    /// The store, still open and still locked.
+    pub store: Keystore<M>,
+    pub client: MeshClient<T>,
+}
+
+impl<M: Medium, T: Transport> fmt::Debug for Refused<M, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Refused")
+            .field("refusal", &self.refusal)
+            .finish_non_exhaustive()
+    }
+}
+
+/// What [`Wallet::open_or_return_with`] gives back when it does not open: why
+/// -- refused, or cancelled -- and the store and the client it was handed, as
+/// they were.
+///
+/// [`Refused`] is the uncancellable open's answer and carries a refusal
+/// alone; this carries [`Unfinished`], so a cancel is told apart from a
+/// refusal by its variant here as everywhere else, and both hand the parts
+/// back on the same terms: the store unreconciled, still open and still
+/// locked, with no `Wallet` built from it.
+pub struct Unopened<M: Medium, T: Transport> {
+    /// `Cancelled`, or the refusal [`Wallet::open`] would report.
+    pub why: Unfinished<StartupRefusal>,
+    /// The store, still open and still locked.
+    pub store: Keystore<M>,
+    pub client: MeshClient<T>,
+}
+
+impl<M: Medium, T: Transport> fmt::Debug for Unopened<M, T> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Unopened")
+            .field("why", &self.why)
+            .finish_non_exhaustive()
+    }
+}
+
+/// Why an open did not produce a wallet, with the store and the client it
+/// was handed: what the one reconciliation every open runs returns short of
+/// a wallet, before each open keeps the parts or drops them.
+type HandedBack<E, M, T> = (E, Keystore<M>, MeshClient<T>);
 
 /// What settling found. Not `Copy`: `StillOutstanding` carries the
 /// reservation's diagnosis, which may hold the error a tip read returned.
@@ -189,28 +252,167 @@ impl<M: Medium, T: Transport> Wallet<M, T> {
         client: MeshClient<T>,
         master: Option<&Secret<SEED_LEN>>,
     ) -> core::result::Result<Wallet<M, T>, StartupRefusal> {
+        // `NEVER` is never asked, so `cancelled` is never called; `Ok` is the
+        // answer that ends nothing.
+        Self::open_asking(store, client, master, &Cancel::NEVER, None, || Ok(())).map_err(|(refusal, _, _)| refusal)
+    }
+
+    /// [`Wallet::open`], handing the store and the client back when it
+    /// refuses ([`Refused`]).
+    ///
+    /// The same reconciliation and the same refusal: `open` is this with the
+    /// parts dropped. A wallet that opens is the wallet `open` returns.
+    #[allow(clippy::result_large_err)]
+    pub fn open_or_return(
+        store: Keystore<M>,
+        client: MeshClient<T>,
+        master: Option<&Secret<SEED_LEN>>,
+    ) -> core::result::Result<Wallet<M, T>, Refused<M, T>> {
+        Self::open_asking(store, client, master, &Cancel::NEVER, None, || Ok(()))
+            .map_err(|(refusal, store, client)| Refused { refusal, store, client })
+    }
+
+    /// [`Wallet::open`], stoppable from outside: `cancel` is asked before
+    /// each account and once per position of each diagnostic walk.
+    ///
+    /// A cancel is [`Unfinished::Cancelled`] and never a refusal. A walk it
+    /// ends leaves a report that is true and incomplete -- the account
+    /// diverged, and where to is unknown -- and a refusal built from it would
+    /// name an account for what was the caller's decision, so the whole call
+    /// answers `Cancelled` instead. Nothing is written either way: opening
+    /// reads the store and asks the node. The store and the client are
+    /// dropped with the call, as they are when `open` refuses;
+    /// [`Wallet::open_or_return_with`] hands them back.
+    #[allow(clippy::result_large_err)]
+    pub fn open_with(
+        store: Keystore<M>,
+        client: MeshClient<T>,
+        master: Option<&Secret<SEED_LEN>>,
+        cancel: &Cancel<'_>,
+    ) -> core::result::Result<Wallet<M, T>, Unfinished<StartupRefusal>> {
+        Self::open_asking(store, client, master, cancel, None, || Err(Unfinished::Cancelled)).map_err(|(why, _, _)| why)
+    }
+
+    /// [`Wallet::open_with`], handing the store and the client back when it
+    /// is refused or cancelled ([`Unopened`]).
+    ///
+    /// The open a caller runs when it holds the password only for as long as
+    /// the request that brought it, and must be able to stop: a cancel, like
+    /// a refusal, leaves the store open and locked in the caller's hands, so
+    /// it can be opened again, or dropped, without asking for the password
+    /// again.
+    #[allow(clippy::result_large_err)]
+    pub fn open_or_return_with(
+        store: Keystore<M>,
+        client: MeshClient<T>,
+        master: Option<&Secret<SEED_LEN>>,
+        cancel: &Cancel<'_>,
+    ) -> core::result::Result<Wallet<M, T>, Unopened<M, T>> {
+        Self::open_asking(store, client, master, cancel, None, || Err(Unfinished::Cancelled))
+            .map_err(|(why, store, client)| Unopened { why, store, client })
+    }
+
+    /// [`Wallet::open_with`], telling `progress` how far it has got: before
+    /// each account, and every [`recon::PROGRESS_EVERY`] positions of each
+    /// diagnostic walk ([`Progress`]).
+    ///
+    /// `progress` is called on this thread, between steps, and the call
+    /// waits for it. What it is handed is counted from the walk, not
+    /// predicted, so a report of it is no claim about how long is left.
+    #[allow(clippy::result_large_err)]
+    pub fn open_with_progress(
+        store: Keystore<M>,
+        client: MeshClient<T>,
+        master: Option<&Secret<SEED_LEN>>,
+        cancel: &Cancel<'_>,
+        progress: &mut dyn FnMut(Progress),
+    ) -> core::result::Result<Wallet<M, T>, Unfinished<StartupRefusal>> {
+        Self::open_asking(store, client, master, cancel, Some(progress), || Err(Unfinished::Cancelled))
+            .map_err(|(why, _, _)| why)
+    }
+
+    /// [`Wallet::open_or_return_with`], telling `progress` how far it has
+    /// got, as [`Wallet::open_with_progress`] does.
+    #[allow(clippy::result_large_err)]
+    pub fn open_or_return_with_progress(
+        store: Keystore<M>,
+        client: MeshClient<T>,
+        master: Option<&Secret<SEED_LEN>>,
+        cancel: &Cancel<'_>,
+        progress: &mut dyn FnMut(Progress),
+    ) -> core::result::Result<Wallet<M, T>, Unopened<M, T>> {
+        Self::open_asking(store, client, master, cancel, Some(progress), || Err(Unfinished::Cancelled))
+            .map_err(|(why, store, client)| Unopened { why, store, client })
+    }
+
+    /// The one reconciliation every open runs. `cancelled` is what a cancel
+    /// ends the call with, and it is called only once `cancel` has said stop
+    /// or a walk records that it did. Whatever ends the call short of a
+    /// wallet comes back with the store and the client it was handed, for the
+    /// opens that return them; the others drop them there.
+    #[allow(clippy::result_large_err)]
+    fn open_asking<E: From<StartupRefusal>>(
+        store: Keystore<M>,
+        client: MeshClient<T>,
+        master: Option<&Secret<SEED_LEN>>,
+        cancel: &Cancel<'_>,
+        mut progress: Option<&mut dyn FnMut(Progress)>,
+        cancelled: impl Fn() -> core::result::Result<(), E>,
+    ) -> core::result::Result<Wallet<M, T>, HandedBack<E, M, T>> {
         let tags = match store.tags() {
             Ok(t) => t,
             Err(cause) => {
-                return Err(StartupRefusal {
+                let refusal = StartupRefusal {
                     diverged: vec![Divergence::CannotReconcile {
                         tag: [0u8; 20],
                         cause,
                     }],
                     accounts: 0,
-                })
+                };
+                return Err((refusal.into(), store, client));
             }
         };
         let accounts = tags.len();
         let mut ok: Vec<(Tag, AccountStatus)> = Vec::new();
         let mut diverged: Vec<Divergence> = Vec::new();
-        for tag in tags {
+        for (n, tag) in tags.into_iter().enumerate() {
+            if cancel.stop() {
+                if let Err(why) = cancelled() {
+                    return Err((why, store, client));
+                }
+            }
+            let at = Progress {
+                account: u32::try_from(n).unwrap_or(u32::MAX),
+                accounts: u32::try_from(accounts).unwrap_or(u32::MAX),
+                position: 0,
+                // Read only for a caller that watches: it is the one figure
+                // here that needs the store's view.
+                ceiling: match progress {
+                    Some(_) => ScanScope::DIAGNOSTIC.reach(store.view(&tag).ok().flatten().map(|v| v.wots_index)),
+                    None => 0,
+                },
+            };
+            if let Some(report) = progress.as_deref_mut() {
+                report(at);
+            }
             match Self::access_for(&store, &tag, master) {
                 Err(d) => diverged.push(d),
-                Ok(access) => match recon::reconcile_account(&store, &client, &tag, &access) {
-                    Ok(status) => ok.push((tag, status)),
-                    Err(d) => diverged.push(d),
-                },
+                Ok(access) => {
+                    let reconciled = recon::watched(cancel, progress.as_deref_mut(), at, |cancel| {
+                        recon::reconcile_account_with(&store, &client, &tag, &access, &ScanScope::DIAGNOSTIC, cancel)
+                    });
+                    match reconciled {
+                        Ok(status) => ok.push((tag, status)),
+                        Err(d) => {
+                            if d.stopped_by_cancel() {
+                                if let Err(why) = cancelled() {
+                                    return Err((why, store, client));
+                                }
+                            }
+                            diverged.push(d);
+                        }
+                    }
+                }
             }
         }
         // **Refused only when nothing is operable.** A wallet whose every
@@ -221,7 +423,7 @@ impl<M: Medium, T: Transport> Wallet<M, T> {
         // This comparison does not authenticate the node's answer. A store
         // with no accounts in it diverges nowhere and opens, as it always has.
         if ok.is_empty() && !diverged.is_empty() {
-            return Err(StartupRefusal { diverged, accounts });
+            return Err((StartupRefusal { diverged, accounts }.into(), store, client));
         }
         Ok(Wallet {
             store,

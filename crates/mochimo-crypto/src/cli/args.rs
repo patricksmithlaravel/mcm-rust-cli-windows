@@ -1089,7 +1089,7 @@ fn asks_for_help(a: &str) -> bool {
 /// Anything that is not a scheme this program knows is left alone: the
 /// transport refuses it by scheme, and refusing it twice in two vocabularies
 /// helps nobody.
-fn plaintext_off_loopback(url: &str) -> bool {
+pub fn plaintext_off_loopback(url: &str) -> bool {
     // One trailing slash, as the transport strips before it reads the
     // authority, so `http://localhost/` and `http://localhost` are one case.
     let url = url.strip_suffix('/').unwrap_or(url);

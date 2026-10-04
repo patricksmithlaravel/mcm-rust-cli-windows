@@ -46,6 +46,7 @@ use crate::consts::SEED_LEN;
 use crate::derive;
 use crate::keystore::{Keystore, Medium};
 use crate::mesh::{LedgerEntry, MeshClient, Transport};
+use crate::recon::{Cancel, Progress, Unfinished};
 use crate::{Error, Secret};
 
 /// What the node said about one account index, and what this store holds.
@@ -112,8 +113,65 @@ pub fn sweep<M: Medium, T: Transport>(
     master: &Secret<SEED_LEN>,
     to: u32,
 ) -> core::result::Result<Sweep, SweepFailure> {
+    // `NEVER` is never asked, so `cancelled` is never called; `Ok` is the
+    // answer that ends nothing.
+    sweep_asking(store, client, master, to, &Cancel::NEVER, None, || Ok(()))
+}
+
+/// [`sweep`], stoppable from outside: `cancel` is asked before each index's
+/// node call.
+///
+/// A cancel is [`Unfinished::Cancelled`], never a [`SweepFailure`] and never
+/// a [`Sweep`] of the indices asked so far: a short extent carried as a whole
+/// one is the absence by omission this module refuses (module doc).
+pub fn sweep_with<M: Medium, T: Transport>(
+    store: &Keystore<M>,
+    client: &MeshClient<T>,
+    master: &Secret<SEED_LEN>,
+    to: u32,
+    cancel: &Cancel<'_>,
+) -> core::result::Result<Sweep, Unfinished<SweepFailure>> {
+    sweep_asking(store, client, master, to, cancel, None, || Err(Unfinished::Cancelled))
+}
+
+/// [`sweep_with`], telling `progress` which index it is about to ask the
+/// node about ([`Progress`]: index `account` of the `to + 1` searched, with
+/// no walk, so `position` and `ceiling` are zero).
+pub fn sweep_with_progress<M: Medium, T: Transport>(
+    store: &Keystore<M>,
+    client: &MeshClient<T>,
+    master: &Secret<SEED_LEN>,
+    to: u32,
+    cancel: &Cancel<'_>,
+    progress: &mut dyn FnMut(Progress),
+) -> core::result::Result<Sweep, Unfinished<SweepFailure>> {
+    sweep_asking(store, client, master, to, cancel, Some(progress), || Err(Unfinished::Cancelled))
+}
+
+/// The one sweep the three forms run. `cancelled` is what a cancel ends the
+/// call with, and it is called only once `cancel` has said stop.
+fn sweep_asking<M: Medium, T: Transport, E: From<SweepFailure>>(
+    store: &Keystore<M>,
+    client: &MeshClient<T>,
+    master: &Secret<SEED_LEN>,
+    to: u32,
+    cancel: &Cancel<'_>,
+    mut progress: Option<&mut dyn FnMut(Progress)>,
+    cancelled: impl Fn() -> core::result::Result<(), E>,
+) -> core::result::Result<Sweep, E> {
     let mut sightings = Vec::new();
     for account in 0..=to {
+        if cancel.stop() {
+            cancelled()?;
+        }
+        if let Some(report) = progress.as_deref_mut() {
+            report(Progress {
+                account,
+                accounts: to.saturating_add(1),
+                position: 0,
+                ceiling: 0,
+            });
+        }
         let tag = derive::derive_account_tag(master, account);
         let entry = match client.resolve_tag(&tag) {
             Ok(e) => Some(e),
@@ -125,7 +183,8 @@ pub fn sweep<M: Medium, T: Transport>(
                     account,
                     searched: account,
                     cause,
-                })
+                }
+                .into())
             }
         };
         sightings.push(Sighting {

@@ -7189,3 +7189,411 @@ fn paying_the_emptied_account_from_its_sibling_lets_it_settle() {
     assert_eq!(r.code, Code::Ok, "the re-funded account did not settle:\n{}", r.text);
     assert_says(&r, "settled", "settle after the account was paid");
 }
+
+// ---------------------------------------------------------------------------
+// The long operations, cancelled
+// ---------------------------------------------------------------------------
+
+/// Counts its askings and says stop at the `at`-th, counted from zero, so a
+/// test can land a cancel at a chosen point and read how often it was asked.
+/// `new` keeps saying stop from there on; `once` says it at that asking alone
+/// and `false` after, which `Cancel::when` allows -- a flag cleared as it is
+/// read answers that way -- and which an operation that asks again rather
+/// than remembering what its walk heard would misread. `u32::MAX` never says
+/// stop, which is how a run measures its own askings.
+struct StopAt {
+    at: u32,
+    once: bool,
+    asked: std::cell::Cell<u32>,
+}
+
+impl StopAt {
+    fn new(at: u32) -> StopAt {
+        StopAt { at, once: false, asked: std::cell::Cell::new(0) }
+    }
+
+    fn once(at: u32) -> StopAt {
+        StopAt { at, once: true, asked: std::cell::Cell::new(0) }
+    }
+
+    fn ask(&self) -> bool {
+        let n = self.asked.get();
+        self.asked.set(n + 1);
+        if self.once {
+            n == self.at
+        } else {
+            n >= self.at
+        }
+    }
+}
+
+/// **A restore cancelled at any point it asks writes nothing, and says
+/// `Cancelled`.**
+///
+/// The store holds account 0 and the chain holds account 1 at position 2,
+/// so an uncancelled restore of account 1 asks its cancel five times: before
+/// the node, at positions 0, 1 and 2, and before the one commit. That run is
+/// measured first and is the control: it adds the account at index 2. Then a
+/// cancel is landed at each of the five askings in turn, on a fresh store
+/// each time, once as a cancel that stays raised and once as one said a
+/// single time: the first asks the node nothing, the last is the one between
+/// the scan's answer and the commit, and every one leaves the snapshot the
+/// same bytes and the account absent.
+#[test]
+fn a_restore_cancelled_at_any_point_writes_nothing() {
+    use mochimo_crypto::cli::restore;
+    use mochimo_crypto::recon::{Cancel, Unfinished};
+    let m = master();
+    let tag1 = mochimo_crypto::derive::derive_account_tag(&m, 1);
+    let at2 = mochimo_crypto::recon::derived_address_at(&m, 1, chain::pos(2));
+    let chain = || Chain::new(&[(tag1, ChainState::At(at2, 3_000))]);
+
+    let (_dir, mut ks) = store("cli-restore-cancel-measure");
+    let measure = StopAt::new(u32::MAX);
+    let ask = || measure.ask();
+    let client = MeshClient::new(chain());
+    let restored = restore::restore_account_with(&mut ks, &client, &m, 1, Some(4), &Cancel::when(&ask))
+        .unwrap_or_else(|e| panic!("an uncancelled restore failed: {e:?}"));
+    assert_eq!(restored.found.index.get(), 2);
+    assert_eq!(restored.held_at, None, "the control did not add the account");
+    let askings = measure.asked.get();
+    assert_eq!(askings, 5, "a restore found at position 2 asked its cancel {askings} time(s), not 5");
+
+    for (at, stop) in (0..askings).flat_map(|at| [(at, StopAt::new(at)), (at, StopAt::once(at))]) {
+        let (dir, mut ks) = store("cli-restore-cancel");
+        let before = dir.snapshot_bytes();
+        let ask = || stop.ask();
+        let client = MeshClient::new(chain());
+        let result = restore::restore_account_with(&mut ks, &client, &m, 1, Some(4), &Cancel::when(&ask));
+        assert!(
+            matches!(result, Err(Unfinished::Cancelled)),
+            "a cancel at asking {at} came back as {:?}",
+            result.as_ref().map(|r| r.found.index.get())
+        );
+        assert_eq!(dir.snapshot_bytes(), before, "a cancel at asking {at} changed the snapshot");
+        assert!(
+            ks.view(&tag1).unwrap_or_else(|e| panic!("{e}")).is_none(),
+            "a cancel at asking {at} left the account in the store"
+        );
+        let expected = usize::from(at > 0);
+        assert_eq!(client.transport().calls(), expected, "a cancel at asking {at} asked the node the wrong number of times");
+    }
+}
+
+/// **A sweep cancelled before any index's node call stops there, and says
+/// `Cancelled` -- not a sweep of the indices it reached**, which would carry
+/// a short extent as the one asked for.
+///
+/// The control is the same sweep with a cancel that never fires: it equals
+/// `sweep`'s own result and asks once per index, so the counts below are
+/// counts of requests.
+#[test]
+fn a_sweep_cancelled_before_any_index_asks_no_further_and_writes_nothing() {
+    use mochimo_crypto::cli::discover;
+    use mochimo_crypto::recon::{Cancel, Unfinished};
+    let m = master();
+    let chain = || Chain::new(&[(TAG, ChainState::At(addr_at(0), 5_000_000))]);
+    let (dir, ks) = store("cli-sweep-cancel");
+    let before = dir.snapshot_bytes();
+
+    let plain = discover::sweep(&ks, &MeshClient::new(chain()), &m, 3).unwrap_or_else(|e| panic!("{e:?}"));
+    let never = StopAt::new(u32::MAX);
+    let ask = || never.ask();
+    let client = MeshClient::new(chain());
+    let same = discover::sweep_with(&ks, &client, &m, 3, &Cancel::when(&ask)).unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(same, plain, "a cancel that never fires changed the sweep");
+    assert_eq!(client.transport().calls(), 4);
+    assert_eq!(never.asked.get(), 4, "the cancel was not asked once per index");
+
+    for (at, stop) in (0..4u32).flat_map(|at| [(at, StopAt::new(at)), (at, StopAt::once(at))]) {
+        let ask = || stop.ask();
+        let client = MeshClient::new(chain());
+        let result = discover::sweep_with(&ks, &client, &m, 3, &Cancel::when(&ask));
+        assert!(matches!(result, Err(Unfinished::Cancelled)), "a cancel before index {at} came back as {result:?}");
+        assert_eq!(client.transport().calls(), at as usize, "a cancel before index {at} asked about it anyway");
+    }
+    assert_eq!(dir.snapshot_bytes(), before, "a sweep changed the snapshot");
+}
+
+/// **A reconcile cancelled at any point it asks writes nothing, and says
+/// `Cancelled` -- never `AcknowledgementDoesNotMatch`.**
+///
+/// The store is at 0 and the chain at 3, and the operator names 3. An
+/// uncancelled run asks its cancel before the account, at the four positions
+/// its walk takes to find 3, before the write's own re-check, at the four
+/// positions of that re-check's walk, and once more between the re-check's
+/// match and the write: eleven askings, measured first, and the control
+/// advances to 3. The last is the boundary a walk alone leaves open -- it
+/// asks before each position and not after the one that matches, so a
+/// cancel raised while position 3 is derived would otherwise reach the write
+/// unheard. A cancel landed in the re-check's walk leaves the account
+/// unlocated, which no acknowledgement names, and the re-check refuses it as
+/// not matching; that refusal is the cancel's, and it comes back as
+/// `Cancelled` -- for a cancel said a single time as well, which answers
+/// `false` if it is asked again once the walk has stopped. Every landing, of
+/// either kind, leaves the snapshot the same bytes and the stored index at 0.
+#[test]
+fn a_reconcile_cancelled_at_any_point_writes_nothing() {
+    use mochimo_crypto::cli::reconcile;
+    use mochimo_crypto::recon::{Cancel, Unfinished};
+    let m = master();
+    let chain = || Chain::new(&[(TAG, ChainState::At(addr_at(3), 1_000))]);
+
+    let (dir, mut ks) = store("cli-reconcile-cancel-measure");
+    let measure = StopAt::new(u32::MAX);
+    let ask = || measure.ask();
+    let reviewed = reconcile::advance_acknowledged_with(&mut ks, &MeshClient::new(chain()), &TAG, Some(&m), 3, &Cancel::when(&ask))
+        .unwrap_or_else(|e| panic!("an uncancelled reconcile failed: {e:?}"));
+    assert_eq!(reviewed.outcome, reconcile::Outcome::Advanced { index: 3 }, "the control did not advance");
+    drop(ks);
+    assert_eq!(stored_index(&dir), 3);
+    let askings = measure.asked.get();
+    assert_eq!(askings, 11, "the reconcile asked its cancel {askings} time(s), not 11");
+
+    for (at, stop) in (0..askings).flat_map(|at| [(at, StopAt::new(at)), (at, StopAt::once(at))]) {
+        let (dir, mut ks) = store("cli-reconcile-cancel");
+        let before = dir.snapshot_bytes();
+        let ask = || stop.ask();
+        let client = MeshClient::new(chain());
+        let result = reconcile::advance_acknowledged_with(&mut ks, &client, &TAG, Some(&m), 3, &Cancel::when(&ask));
+        assert!(
+            matches!(result, Err(Unfinished::Cancelled)),
+            "a cancel at asking {at} came back as {:?}",
+            result.as_ref().map(|r| &r.outcome)
+        );
+        if at == 0 {
+            assert_eq!(client.transport().calls(), 0, "a cancel raised first asked the node");
+        }
+        drop(ks);
+        assert_eq!(dir.snapshot_bytes(), before, "a cancel at asking {at} changed the snapshot");
+        assert_eq!(stored_index(&dir), 0, "a cancel at asking {at} moved the index");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The long operations, watched
+// ---------------------------------------------------------------------------
+
+/// **A restore reports once before it asks the node, and then every
+/// `PROGRESS_EVERY` positions of its scan**, each figure counted from the
+/// scan rather than predicted.
+///
+/// The chain holds account 1 at position `PROGRESS_EVERY - 1`, so the scan
+/// reaches exactly `PROGRESS_EVERY` positions and reports once on the way,
+/// against the ceiling the operator's `--scan-to` sets. The first report is
+/// made before any request and the second after the one; the account is
+/// added where the plain restore would add it.
+#[test]
+fn a_restore_reports_before_the_node_and_every_progress_interval_of_its_scan() {
+    use mochimo_crypto::cli::restore;
+    use mochimo_crypto::recon::{Cancel, Progress, PROGRESS_EVERY};
+    let m = master();
+    let tag1 = mochimo_crypto::derive::derive_account_tag(&m, 1);
+    let last = PROGRESS_EVERY - 1;
+    let at = mochimo_crypto::recon::derived_address_at(&m, 1, chain::pos(last));
+    let (_dir, mut ks) = store("cli-restore-progress");
+    let client = MeshClient::new(Chain::new(&[(tag1, ChainState::At(at, 3_000))]));
+    let mut seen: Vec<(Progress, usize)> = Vec::new();
+    let scan_to = PROGRESS_EVERY + 100;
+    let restored = restore::restore_account_with_progress(&mut ks, &client, &m, 1, Some(scan_to), &Cancel::NEVER, &mut |p| {
+        seen.push((p, client.transport().calls()));
+    })
+    .unwrap_or_else(|e| panic!("an uncancelled restore failed: {e:?}"));
+    assert_eq!(restored.found.index.get(), last);
+    let ceiling = scan_to + 1;
+    assert_eq!(
+        seen,
+        vec![
+            (Progress { account: 0, accounts: 1, position: 0, ceiling }, 0),
+            (Progress { account: 0, accounts: 1, position: PROGRESS_EVERY, ceiling }, 1),
+        ],
+        "the restore's reports were not one before the node and one per interval of its scan"
+    );
+}
+
+/// **A sweep reports each index before it asks the node about it**, with no
+/// walk to count: position and ceiling are zero, and the reports are the
+/// indices searched, in order.
+#[test]
+fn a_sweep_reports_each_index_before_it_asks_the_node_about_it() {
+    use mochimo_crypto::cli::discover;
+    use mochimo_crypto::recon::{Cancel, Progress};
+    let m = master();
+    let (_dir, ks) = store("cli-sweep-progress");
+    let client = MeshClient::new(Chain::new(&[(TAG, ChainState::At(addr_at(0), 5_000_000))]));
+    let mut seen: Vec<(Progress, usize)> = Vec::new();
+    let swept = discover::sweep_with_progress(&ks, &client, &m, 3, &Cancel::NEVER, &mut |p| {
+        seen.push((p, client.transport().calls()));
+    })
+    .unwrap_or_else(|e| panic!("{e:?}"));
+    assert_eq!(swept.to, 3);
+    let expected: Vec<(Progress, usize)> = (0..4u32)
+        .map(|account| (Progress { account, accounts: 4, position: 0, ceiling: 0 }, account as usize))
+        .collect();
+    assert_eq!(seen, expected, "the sweep did not report each index once, before its node call");
+}
+
+/// **A reconcile reports each account before it is reconciled, and the named
+/// one again before the write's re-check walks it a second time.**
+///
+/// The store is at 0, the chain at 3, and the operator names 3: the walk
+/// reaches 3 in four positions, short of an interval, so the reports are the
+/// two starts. Their ceiling is what a walk under `--advance-to 3` reaches
+/// around the stored position -- the window, which holds the raised ceiling
+/// inside it.
+#[test]
+fn a_reconcile_reports_each_account_and_the_named_one_again_before_the_write() {
+    use mochimo_crypto::cli::reconcile;
+    use mochimo_crypto::recon::{Cancel, Progress, ScanScope, DIVERGENCE_WINDOW};
+    let m = master();
+    let (dir, mut ks) = store("cli-reconcile-progress");
+    let client = MeshClient::new(Chain::new(&[(TAG, ChainState::At(addr_at(3), 1_000))]));
+    let mut seen: Vec<(Progress, usize)> = Vec::new();
+    let reviewed = reconcile::advance_acknowledged_with_progress(&mut ks, &client, &TAG, Some(&m), 3, &Cancel::NEVER, &mut |p| {
+        seen.push((p, client.transport().calls()));
+    })
+    .unwrap_or_else(|e| panic!("an uncancelled reconcile failed: {e:?}"));
+    assert_eq!(reviewed.outcome, reconcile::Outcome::Advanced { index: 3 });
+    drop(ks);
+    assert_eq!(stored_index(&dir), 3);
+    // Window positions 0 through 20 hold the raised ceiling's 0 through 3.
+    let ceiling = DIVERGENCE_WINDOW + 1;
+    assert_eq!(ScanScope::DIAGNOSTIC.window, Some(DIVERGENCE_WINDOW));
+    assert_eq!(
+        seen,
+        vec![
+            (Progress { account: 0, accounts: 1, position: 0, ceiling }, 0),
+            (Progress { account: 0, accounts: 1, position: 0, ceiling }, 1),
+        ],
+        "the reconcile did not report its account, and again before the re-check"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The command line's decisions, called from outside it
+// ---------------------------------------------------------------------------
+
+/// **`status_outcome` is the decision `status` makes**: for each class of
+/// answer the comparison gives, the outcome built from
+/// `reconcile::account_status`'s result equals the one `decide` returns for
+/// the same command over the same state.
+///
+/// In sync, a divergence (the chain at 3 under a store at 0), a tag the
+/// store does not hold, and a chain that cannot be reached -- the four
+/// outcomes `status` has.
+#[test]
+fn status_outcome_is_the_decision_status_makes_for_every_class_of_answer() {
+    use mochimo_crypto::cli::outcome::Outcome;
+    let m = master();
+    let alien = [0x42; ADDR_TAG_LEN];
+    let cases: [(&str, ChainState, [u8; ADDR_TAG_LEN]); 4] = [
+        ("in sync", ChainState::At(addr_at(0), 5_000_000), TAG),
+        ("diverged", ChainState::At(addr_at(3), 5_000_000), TAG),
+        ("not held", ChainState::At(addr_at(0), 5_000_000), alien),
+        ("unreachable", ChainState::Unreachable, TAG),
+    ];
+    let mut kinds = Vec::new();
+    for (what, state, asked) in cases {
+        let (_d1, ks) = store("cli-status-outcome-decide");
+        let decided = cli::decide(ks, MeshClient::new(Chain::new(&[(TAG, state)])), &Command::Status { tag: asked, scan_to: None });
+        let (_d2, ks) = store("cli-status-outcome-direct");
+        let compared = cli::reconcile::account_status(&ks, &MeshClient::new(Chain::new(&[(TAG, state)])), &asked, Some(&m), None);
+        let direct = cli::status_outcome(&asked, compared);
+        assert_eq!(direct, decided.outcome, "{what}: status_outcome decided differently from status");
+        kinds.push(match direct {
+            Outcome::Status { .. } => "Status",
+            Outcome::StatusDiverged { .. } => "StatusDiverged",
+            Outcome::NoSuchAccount { .. } => "NoSuchAccount",
+            Outcome::StatusRefused { .. } => "StatusRefused",
+            _ => "another",
+        });
+    }
+    assert_eq!(kinds, ["Status", "StatusDiverged", "NoSuchAccount", "StatusRefused"], "the cases did not reach every class");
+}
+
+/// **`resign_outcome` is the decision `resign` makes**: over a store holding
+/// a reservation, the outcome built from `Wallet::resign_pending`'s answer
+/// equals the one `decide` returns for the same `resign`, for a spend that is
+/// not the reserved one, a reservation the chain has moved past, and a
+/// reproduction written to the socket. `resign` writes nothing to the store,
+/// so both paths run over the one reservation.
+#[test]
+fn resign_outcome_is_the_decision_resign_makes() {
+    use mochimo_crypto::cli::outcome::Outcome;
+    let m = master();
+    let (dir, _artifact) = send_that_never_left("cli-resign-outcome");
+    let id = id_for_the_spend("cli-resign-outcome-id");
+    let mut wrong = spend();
+    wrong.dsts[0].amount = Some(999);
+    let cases: [(&str, Spend, ChainState); 3] = [
+        ("not the reserved spend", wrong, ChainState::At(addr_at(0), 5_000_000)),
+        ("already landed", spend(), ChainState::At(addr_at(1), 4_998_500)),
+        ("reproduced", spend(), ChainState::At(addr_at(0), 5_000_000)),
+    ];
+    let mut kinds = Vec::new();
+    for (what, s, state) in cases {
+        let chain = || {
+            let c = Chain::new(&[(TAG, state)]);
+            c.accepts_submit(id);
+            c
+        };
+        let ks = reopen("resign outcome decide", dir.path()).result.unwrap_or_else(|e| panic!("{e}"));
+        let decided = cli::decide(ks, MeshClient::new(chain()), &Command::Resign(s.clone()));
+
+        let ks = reopen("resign outcome direct", dir.path()).result.unwrap_or_else(|e| panic!("{e}"));
+        let mut w = Wallet::open(ks, MeshClient::new(chain()), Some(&m)).unwrap_or_else(|e| panic!("{what}: {e}"));
+        let access = cli::key_access(w.store(), &s.tag, Some(&m)).unwrap_or_else(|e| panic!("{e}"));
+        let dsts: Vec<Destination> = s
+            .dsts
+            .iter()
+            .map(|d| Destination { tag: d.to, reference: d.reference, amount: d.amount.unwrap_or(0) })
+            .collect();
+        let mut listed = dsts.clone();
+        listed.sort_by_key(Destination::mdst_image);
+        let resigned = w.resign_pending(&s.tag, &access, dsts, s.fee_total, s.blk_to_live);
+        let direct = cli::resign_outcome(&w, &s.tag, listed, s.blk_to_live, resigned);
+        assert_eq!(direct, decided.outcome, "{what}: resign_outcome decided differently from resign");
+        kinds.push(match direct {
+            Outcome::NotTheReservedSpend => "NotTheReservedSpend",
+            Outcome::ReservationAlreadyLanded { .. } => "ReservationAlreadyLanded",
+            Outcome::Resigned { .. } => "Resigned",
+            _ => "another",
+        });
+    }
+    assert_eq!(kinds, ["NotTheReservedSpend", "ReservationAlreadyLanded", "Resigned"], "the cases did not reach every class");
+}
+
+/// **The decisions made public answer as the command line does**, through
+/// the names a caller now has: the key access an account's kind needs and
+/// its refusals, the amount `all` sends, the scope `--scan-to` asks for, the
+/// sentence every refusal before `create`'s write ends in, and which node
+/// URLs need `--allow-plaintext-node`.
+#[test]
+fn the_decisions_made_public_answer_as_the_command_line_does() {
+    use mochimo_crypto::recon::ScanScope;
+    use mochimo_crypto::Error;
+    let m = master();
+    let (_dir, ks) = store("cli-public-decisions");
+    assert!(matches!(cli::key_access(&ks, &TAG, Some(&m)), Ok(KeyAccess::Master(_))));
+    assert!(matches!(cli::key_access(&ks, &TAG, None), Err(Error::KeyAccessMismatch { .. })));
+    assert!(matches!(cli::key_access(&ks, &[0x42; ADDR_TAG_LEN], Some(&m)), Err(Error::NoSuchAccount)));
+
+    assert_eq!(cli::spend_all_amount(5_000_000, MFEE), Ok(5_000_000 - MFEE));
+    assert!(matches!(cli::spend_all_amount(MFEE, MFEE), Err(Error::InsufficientBalance { .. })));
+
+    assert_eq!(cli::reconcile::scope_to(None), ScanScope::DIAGNOSTIC);
+    assert_eq!(cli::reconcile::scope_to(Some(500)), ScanScope::DIAGNOSTIC.with_ceiling(501));
+
+    assert_eq!(cli::create::nothing_was_created("the terminal closed"), "the terminal closed. Nothing was created.");
+    assert_eq!(cli::create::nothing_was_created("the terminal closed."), "the terminal closed. Nothing was created.");
+
+    for (url, gated) in [
+        ("http://127.0.0.1:8080", false),
+        ("http://localhost/", false),
+        ("http://[::1]:8080", false),
+        ("http://node.example:8080", true),
+        ("https://node.example", false),
+    ] {
+        assert_eq!(args::plaintext_off_loopback(url), gated, "{url}");
+    }
+}

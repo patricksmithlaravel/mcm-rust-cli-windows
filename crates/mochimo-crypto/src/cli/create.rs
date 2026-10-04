@@ -689,7 +689,7 @@ fn read_new_password<T: Terminal>(term: &mut T) -> core::result::Result<Zeroizin
 /// space if the text already ends a sentence, a period and a space if it
 /// does not, so no source has to know another's punctuation: the binary's
 /// end-of-input text ends in a period and its write failures do not.
-fn nothing_was_created(text: impl core::fmt::Display) -> String {
+pub fn nothing_was_created(text: impl core::fmt::Display) -> String {
     let text = text.to_string();
     let text = text.trim_end();
     if text.ends_with(['.', '!', '?']) {

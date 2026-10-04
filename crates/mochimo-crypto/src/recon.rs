@@ -281,6 +281,32 @@ impl ScanScope {
             .chain((0..ceiling).filter(move |i| !edges.is_some_and(|(lo, hi)| (lo..=hi).contains(i))))
             .map(WotsIndex::from_raw)
     }
+
+    /// How many positions a walk of this scope around `local` reaches if it
+    /// finds nothing: the [`Progress::ceiling`] it reports against.
+    ///
+    /// Counted from the scope's edges, not by walking [`ScanScope::positions`]:
+    /// the window, plus the recovery range, less the members of the range the
+    /// window already holds. A raised ceiling can name four billion
+    /// positions, and enumerating them before the first report -- with no
+    /// cancel asked meanwhile, and for an account in sync that walks none --
+    /// would be the wait this figure exists to describe.
+    pub(crate) fn reach(&self, local: Option<WotsIndex>) -> u32 {
+        let ceiling = u64::from(self.ceiling);
+        let total = match self.window_edges(local) {
+            None => ceiling,
+            Some((lo, hi)) => {
+                let (lo, hi) = (u64::from(lo), u64::from(hi));
+                let window = (hi + 1).saturating_sub(lo);
+                let shared = match ceiling.checked_sub(1) {
+                    None => 0,
+                    Some(last) => (hi.min(last) + 1).saturating_sub(lo),
+                };
+                window + ceiling - shared
+            }
+        };
+        u32::try_from(total).unwrap_or(u32::MAX)
+    }
 }
 
 /// What a reconciled account is: local and chain agree, and what about. No
@@ -594,9 +620,123 @@ impl<'a> Cancel<'a> {
 
     /// Ask. `NEVER` never asks, so a caller that passes it pays no call at
     /// all rather than a call that returns `false`.
-    fn stop(&self) -> bool {
+    ///
+    /// Crate-visible because the operations that return [`Unfinished`] ask
+    /// it between their steps as well as once per position.
+    pub(crate) fn stop(&self) -> bool {
         matches!(self.0, Some(asked) if asked())
     }
+}
+
+/// What a cancellable operation returns in place of its result: stopped by
+/// its [`Cancel`], or refused for a reason of its own.
+///
+/// # Why a cancel is a variant here and not inside the refusal
+///
+/// A refusal is a finding -- about an account, the chain or the store -- and
+/// a caller shows it to the person it is about. A cancel is the caller's own
+/// decision coming back, and it found nothing. Carried inside the refusal it
+/// would be one more report for that caller to read and recognise; carried
+/// here it is told apart by a `match`, and a walk that ended
+/// [`StoppedBy::Cancelled`] never reaches a page that names an account.
+///
+/// **A call that returns `Cancelled` wrote nothing.** Each of these
+/// operations that writes asks its `Cancel` again before its one write, so a
+/// call that changed the store returns its result, however late the cancel
+/// arrived.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Unfinished<E> {
+    /// The [`Cancel`] said to stop. Nothing was decided and nothing was
+    /// written.
+    Cancelled,
+    /// The operation's own refusal, as the form of it that takes no `Cancel`
+    /// returns it.
+    Refused(E),
+}
+
+impl<E> From<E> for Unfinished<E> {
+    fn from(refusal: E) -> Unfinished<E> {
+        Unfinished::Refused(refusal)
+    }
+}
+
+/// Run `walk` under a [`Cancel`] that asks `cancel` and remembers whether it
+/// ever said stop, and return that beside the walk's result.
+///
+/// For a caller that meets a cancel only as a refusal it cannot tell from
+/// another, because the walk's own record of it stays inside the call.
+/// [`Cancel::when`] asks only that a stop be answered once, so asking the
+/// predicate again afterwards may hear `false` from one that already ended
+/// the walk -- a flag cleared as it is read, or a predicate that says stop
+/// exactly once -- and read the cancel's refusal as a finding. `NEVER` runs
+/// as it is, unasked, and says no.
+pub(crate) fn remembered<R>(cancel: &Cancel<'_>, walk: impl FnOnce(&Cancel<'_>) -> R) -> (R, bool) {
+    if cancel.0.is_none() {
+        return (walk(cancel), false);
+    }
+    let said_stop = core::cell::Cell::new(false);
+    let asked = || {
+        let stop = cancel.stop();
+        if stop {
+            said_stop.set(true);
+        }
+        stop
+    };
+    let result = walk(&Cancel::when(&asked));
+    (result, said_stop.get())
+}
+
+/// How far a long operation has got, for a caller that shows it.
+///
+/// **Counted, never estimated.** `account` of `accounts` is the account the
+/// operation is on, counted from zero. `position` of `ceiling` is how many
+/// key positions that account's walk has reached of the most it can reach;
+/// a walk that finds what it is looking for stops short of `ceiling`, and an
+/// operation that walks nothing -- a sweep -- reports a `ceiling` of zero.
+///
+/// It is reported before each account, with `position` zero, and every
+/// [`PROGRESS_EVERY`] positions of a walk. An account in sync needs no walk,
+/// so its one report is the first; `ceiling` there is what a walk would
+/// reach, since whether one runs is known only after the node has answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Progress {
+    pub account: u32,
+    pub accounts: u32,
+    pub position: u32,
+    pub ceiling: u32,
+}
+
+/// How many positions a walk reaches between two reports of its
+/// [`Progress`].
+pub const PROGRESS_EVERY: u32 = 256;
+
+/// Run `walk` under a [`Cancel`] that asks `cancel` and, every
+/// [`PROGRESS_EVERY`] positions, hands `progress` how far it has got. With no
+/// `progress`, `walk` runs under `cancel` itself and nothing is counted.
+///
+/// The count rests on the predicate's obligation above: a walk asks once per
+/// position, so the askings are the positions reached, and no walk grows a
+/// parameter for it.
+pub(crate) fn watched<'p, R>(
+    cancel: &Cancel<'_>,
+    progress: Option<&mut (dyn FnMut(Progress) + 'p)>,
+    at: Progress,
+    walk: impl FnOnce(&Cancel<'_>) -> R,
+) -> R {
+    let Some(progress) = progress else {
+        return walk(cancel);
+    };
+    let reached = core::cell::Cell::new(0u32);
+    let progress = core::cell::RefCell::new(progress);
+    let asked = || {
+        let n = reached.get().saturating_add(1);
+        reached.set(n);
+        if n.is_multiple_of(PROGRESS_EVERY) {
+            (*progress.borrow_mut())(Progress { position: n, ..at });
+        }
+        cancel.stop()
+    };
+    walk(&Cancel::when(&asked))
 }
 
 /// A walk that ended before its scope did: where it stopped, and what stopped
@@ -729,6 +869,28 @@ impl Divergence {
                 ..
             } => Some(*index),
             _ => None,
+        }
+    }
+
+    /// Whether this report's diagnostic walk was ended by a [`Cancel`].
+    ///
+    /// Such a report is true -- the comparison had already failed when the
+    /// walk began -- and incomplete, so an operation that returns
+    /// [`Unfinished`] answers it as `Cancelled` rather than handing it on as
+    /// a finding.
+    pub(crate) fn stopped_by_cancel(&self) -> bool {
+        match self {
+            Divergence::IndexMismatch { found, .. } | Divergence::ReservationUnexplained { found, .. } => matches!(
+                found,
+                ChainPosition::Unlocated {
+                    stopped: Some(Stopped {
+                        by: StoppedBy::Cancelled,
+                        ..
+                    }),
+                    ..
+                }
+            ),
+            _ => false,
         }
     }
 }
@@ -1499,16 +1661,59 @@ pub fn advance_after_operator_review<M: Medium, T: Transport>(
     scope: &ScanScope,
     cancel: &Cancel<'_>,
 ) -> Result<AdvanceReceipt> {
-    if ack.tag != *tag {
-        return Err(Error::AcknowledgementDoesNotMatch);
-    }
-    match reconcile_account_with(store, client, tag, access, scope, cancel) {
-        Ok(_) => Err(Error::NothingToReconcile),
-        Err(d) => {
-            if d.advance_target() != Some(ack.target) {
-                return Err(Error::AcknowledgementDoesNotMatch);
+    // Nothing is asked between the re-check and the write: this route, and
+    // `Wallet::advance_after_operator_review_with` above it, write as soon
+    // as the re-check matches.
+    guarded::advance_after_operator_review(store, client, tag, access, ack, scope, cancel, || Ok(()))
+}
+
+/// The acknowledged advance with one more question, asked after its
+/// re-check has matched and before it writes -- the form an operation that
+/// can be cancelled runs.
+///
+/// The re-check's walk asks its `Cancel` before each position and not after
+/// the last, so a cancel raised while that position is derived reaches no
+/// asking before the write unless one is put there. `before_write` is that
+/// asking: an `Err` from it is returned with nothing written. The public
+/// function is this with a question that always answers `Ok`, so its
+/// behaviour is what it was.
+///
+/// A module of its own so the call keeps the name the CLI containment scan
+/// permits in `cli/reconcile.rs` alone: the store-writing route is one route
+/// however it is reached.
+pub(crate) mod guarded {
+    use super::{reconcile_account_with, Cancel, OperatorAcknowledgement, ScanScope};
+    use crate::account::AdvanceReceipt;
+    use crate::addr::Tag;
+    use crate::error::{Error, Result};
+    use crate::keystore::{KeyAccess, Keystore, Medium};
+    use crate::mesh::{MeshClient, Transport};
+
+    /// Eight arguments: the advance's own seven, and the question asked
+    /// before its write.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn advance_after_operator_review<M: Medium, T: Transport>(
+        store: &mut Keystore<M>,
+        client: &MeshClient<T>,
+        tag: &Tag,
+        access: &KeyAccess<'_>,
+        ack: OperatorAcknowledgement,
+        scope: &ScanScope,
+        cancel: &Cancel<'_>,
+        before_write: impl FnOnce() -> Result<()>,
+    ) -> Result<AdvanceReceipt> {
+        if ack.tag != *tag {
+            return Err(Error::AcknowledgementDoesNotMatch);
+        }
+        match reconcile_account_with(store, client, tag, access, scope, cancel) {
+            Ok(_) => Err(Error::NothingToReconcile),
+            Err(d) => {
+                if d.advance_target() != Some(ack.target) {
+                    return Err(Error::AcknowledgementDoesNotMatch);
+                }
+                before_write()?;
+                store.persist_advance_to(tag, ack.target)
             }
-            store.persist_advance_to(tag, ack.target)
         }
     }
 }
