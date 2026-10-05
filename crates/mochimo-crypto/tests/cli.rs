@@ -6709,9 +6709,10 @@ struct Explorer {
     paths: RefCell<Vec<String>>,
     /// Every body posted, in order.
     bodies: RefCell<Vec<Vec<u8>>>,
-    /// When set, `/search/transactions` answers the middleware's internal
-    /// error -- what a deployment with no indexer returns.
-    no_indexer: bool,
+    /// When set, how `/search/transactions` refuses: not served at all, the
+    /// route's 404, as a deployment with no indexer answers, or the
+    /// middleware's error object with a code.
+    search_refused: Option<SearchRefused>,
     /// When set, `/search/transactions` answers an empty page.
     empty: bool,
     /// The ids `/mempool` lists, in its order; empty, it answers `null`, as
@@ -6731,7 +6732,7 @@ impl Explorer {
             tip,
             paths: RefCell::new(Vec::new()),
             bodies: RefCell::new(Vec::new()),
-            no_indexer: false,
+            search_refused: None,
             empty: false,
             queue: Vec::new(),
             gone: Vec::new(),
@@ -6754,7 +6755,11 @@ impl Explorer {
         )
     }
     fn without_indexer(mut self) -> Explorer {
-        self.no_indexer = true;
+        self.search_refused = Some(SearchRefused::NotServed);
+        self
+    }
+    fn refusing_search(mut self, code: u64) -> Explorer {
+        self.search_refused = Some(SearchRefused::Code(code));
         self
     }
     fn with_no_rows(mut self) -> Explorer {
@@ -6786,6 +6791,15 @@ impl Explorer {
     }
 }
 
+/// How [`Explorer`] refuses `/search/transactions`.
+#[derive(Clone, Copy)]
+enum SearchRefused {
+    /// Not served: the deployment runs no indexer.
+    NotServed,
+    /// Served, answering the middleware's error object with this code.
+    Code(u64),
+}
+
 impl mochimo_crypto::mesh::Transport for Explorer {
     fn post(&self, path: &str, body: &[u8]) -> mochimo_crypto::Result<Vec<u8>> {
         self.paths.borrow_mut().push(path.to_owned());
@@ -6803,9 +6817,23 @@ impl mochimo_crypto::mesh::Transport for Explorer {
                 Ok(Explorer::block_body(index).into_bytes())
             }
             "/search/transactions" => {
-                if self.no_indexer {
-                    // `giveError(w, ErrInternalError)`: HTTP 200 with a code.
-                    return Ok(br#"{"code":1,"message":"Internal general error","retriable":true}"#.to_vec());
+                match self.search_refused {
+                    // The route is registered only with the indexer enabled:
+                    // the router's 404, which the transport reports as a
+                    // status other than 200.
+                    Some(SearchRefused::NotServed) => {
+                        return Err(mochimo_crypto::Error::HttpStatus { status: 404 });
+                    }
+                    // `giveError`: HTTP 200 with an object from the table in
+                    // `handlers.go`.
+                    Some(SearchRefused::Code(code)) => {
+                        let (message, retriable) = match code {
+                            1 => ("Invalid request", false),
+                            _ => ("Internal general error", true),
+                        };
+                        return Ok(format!(r#"{{"code":{code},"message":"{message}","retriable":{retriable}}}"#).into_bytes());
+                    }
+                    None => {}
                 }
                 if self.empty {
                     return Ok(br#"{"transactions":[],"total_count":0}"#.to_vec());
@@ -7045,8 +7073,11 @@ fn recent_transactions_from_sends_the_offset_and_says_which_rows_it_shows() {
     println!("  recent-transactions --from: page 1's body unchanged, the offset sent after it, rows 101 to 101 of 250 named, --from 101 offered");
 }
 
-/// A tag the index has never seen prints an empty table and exits 0; a
-/// deployment with no indexer is a refusal that says so.
+/// A tag the index has never seen prints an empty table and exits 0. A
+/// deployment with no indexer does not serve the search, and one whose
+/// indexer did not answer answers code 2: each is a refusal that says which,
+/// for `transaction` as for `recent-transactions`, and code 1, a request the
+/// middleware could not decode, names neither.
 #[test]
 fn recent_transactions_is_empty_on_no_history_and_refuses_with_no_indexer() {
     let r = cli::run_explorer(
@@ -7062,9 +7093,37 @@ fn recent_transactions_is_empty_on_no_history_and_refuses_with_no_indexer() {
         &Command::RecentTransactions { tag: TAG, count: 5, from: 0 },
     );
     assert_eq!(r.code, Code::Refused, "a missing indexer is not an ok page:\n{}", r.text);
-    assert!(r.text.contains("indexer database"), "the refusal does not name the indexer:\n{}", r.text);
+    assert!(r.text.contains("HTTP 404"), "{}", r.text);
+    assert!(r.text.contains("this node does not index"), "the refusal does not name the indexer:\n{}", r.text);
+    assert!(!r.text.contains("did not answer"), "{}", r.text);
     assert!(r.text.contains("no store was opened"), "{}", r.text);
-    println!("  recent-transactions: an empty index is exit 0 with an empty table; no indexer is exit 3 naming it");
+
+    let r = cli::run_explorer(
+        &MeshClient::new(Explorer::new(10).refusing_search(2)),
+        &Command::RecentTransactions { tag: TAG, count: 5, from: 0 },
+    );
+    assert_eq!(r.code, Code::Refused, "{}", r.text);
+    assert!(r.text.contains("mesh error code 2 (retriable)"), "{}", r.text);
+    assert!(r.text.contains("this node runs an indexer, and it did not answer"), "{}", r.text);
+    assert!(!r.text.contains("does not index"), "an indexer that did not answer was read as none:\n{}", r.text);
+
+    let r = cli::run_explorer(
+        &MeshClient::new(Explorer::new(10).refusing_search(1)),
+        &Command::RecentTransactions { tag: TAG, count: 5, from: 0 },
+    );
+    assert_eq!(r.code, Code::Refused, "{}", r.text);
+    assert!(r.text.contains("mesh error code 1"), "{}", r.text);
+    assert!(!r.text.contains("indexer"), "an invalid request was read as about the indexer:\n{}", r.text);
+
+    let hash = [0x18u8; 32];
+    let r = cli::run_explorer(&MeshClient::new(Explorer::new(10).without_indexer()), &Command::LookupTransaction { hash });
+    assert_eq!(r.code, Code::Refused, "{}", r.text);
+    assert!(r.text.contains("this node does not index"), "{}", r.text);
+    let r = cli::run_explorer(&MeshClient::new(Explorer::new(10).refusing_search(2)), &Command::LookupTransaction { hash });
+    assert!(r.text.contains("it did not answer"), "{}", r.text);
+    println!(
+        "  recent-transactions, transaction: an empty index is exit 0 with an empty table; the 404 of no indexer and the code 2 of one that did not answer are exit 3 naming which; code 1 names neither"
+    );
 }
 
 /// **`mempool`**: the queue's size, the first `--count` of it read whole as
@@ -7120,6 +7179,7 @@ fn mempool_says_an_empty_queue_and_refuses_what_it_could_not_read() {
     let r = cli::run_explorer(&MeshClient::new(Explorer::new(10).with_queue(&[], &[], &[[0; 32]])), &Command::Mempool { count: 5 });
     assert_eq!(r.code, Code::Refused, "{}", r.text);
     assert!(r.text.contains("no store was opened"), "{}", r.text);
+    assert!(!r.text.contains("indexer"), "the queue's code 2 was read as about the indexer:\n{}", r.text);
 
     let (a, b) = ([0xa1u8; 32], [0xb2u8; 32]);
     let r = cli::run_explorer(&MeshClient::new(Explorer::new(10).with_queue(&[a, b], &[], &[b])), &Command::Mempool { count: 5 });

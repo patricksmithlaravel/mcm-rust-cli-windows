@@ -284,6 +284,11 @@ pub enum Outcome {
     MempoolStopped { id: [u8; crate::consts::HASHLEN], cause: Error },
     /// The node could not be asked at all.
     ExplorerFailed { cause: Error },
+    /// The node's index could not be searched: `/search/transactions`
+    /// refused, or the node could not be asked. Apart from
+    /// [`Outcome::ExplorerFailed`] because what the middleware answers there
+    /// says whether the node runs an indexer at all.
+    SearchFailed { cause: Error },
     /// `resign` reproduced the artifact and stopped before the socket,
     /// because the source tag would not render.
     ///
