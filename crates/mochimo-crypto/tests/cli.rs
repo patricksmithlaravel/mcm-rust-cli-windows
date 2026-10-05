@@ -1826,7 +1826,7 @@ fn only_create_and_address_parse_without_a_node() {
     let tag = prefixed(&TAG);
     let to = prefixed(&TO);
     let hash = "0x18593f2f13964e5e2a07f147a7d706292f5638b3894daff55eecf3b1b812ccaf";
-    let verbs: [(&str, Vec<&str>, bool); 15] = [
+    let verbs: [(&str, Vec<&str>, bool); 16] = [
         ("create", vec!["create"], false),
         ("address", vec!["address"], false),
         ("balance", vec!["balance"], true),
@@ -1837,15 +1837,16 @@ fn only_create_and_address_parse_without_a_node() {
         ("restore", vec!["restore", "--account", "0"], true),
         ("status", vec!["status", &tag], true),
         ("submit", vec!["submit", "00"], true),
-        // The four read-only verbs. They need a node like every other verb
+        // The five read-only verbs. They need a node like every other verb
         // that asks one anything; what is different about them is that they
         // open no store, which `opens_no_store` says and the pty test drives.
         ("transaction", vec!["transaction", hash], true),
         ("recent-transactions", vec!["recent-transactions", &tag], true),
         ("block", vec!["block", "1078535"], true),
         ("blocks", vec!["blocks"], true),
+        ("mempool", vec!["mempool"], true),
         // `discover` opens a store -- the master is in it -- so it is not one
-        // of `opens_no_store`'s five; it asks a node once per index, so it
+        // of `opens_no_store`'s six; it asks a node once per index, so it
         // needs one.
         ("discover", vec!["discover"], true),
     ];
@@ -1922,6 +1923,15 @@ fn only_create_and_address_parse_without_a_node() {
             Ok(args::ParsedArgv::Run(inv)) => {
                 assert_eq!(inv.node.as_deref(), Some("http://127.0.0.1:8080"), "`{verb}` dropped a supplied --node");
                 assert_eq!(inv.command.needs_node(), *needs, "`{verb}`'s needs_node disagrees with this table");
+                // The verbs the binary runs before the password prompt: the
+                // node is their whole input. A read-only verb missing here
+                // would ask for a password it has no use for.
+                let opens_none = ["submit", "transaction", "recent-transactions", "block", "blocks", "mempool"];
+                assert_eq!(
+                    inv.command.opens_no_store(),
+                    opens_none.contains(verb),
+                    "`{verb}`'s opens_no_store disagrees with the six verbs whose whole input is the node"
+                );
             }
             other => panic!("`{verb}` with --node did not parse to a command: {other:?}"),
         }
@@ -6681,7 +6691,7 @@ fn a_migrated_store_says_its_figures_were_not_recorded_and_is_resealed_by_its_fi
 }
 
 // ---------------------------------------------------------------------------
-// The four read-only verbs
+// The five read-only verbs
 // ---------------------------------------------------------------------------
 
 /// A transport scripted for the explorer endpoints alone.
@@ -6704,11 +6714,44 @@ struct Explorer {
     no_indexer: bool,
     /// When set, `/search/transactions` answers an empty page.
     empty: bool,
+    /// The ids `/mempool` lists, in its order; empty, it answers `null`, as
+    /// the middleware's nil list encodes.
+    queue: Vec<[u8; 32]>,
+    /// Ids `/mempool/transaction` answers code 3 for: the queue no longer
+    /// holds them.
+    gone: Vec<[u8; 32]>,
+    /// Ids `/mempool/transaction` answers code 2 for, and, when it holds the
+    /// all-zero id, what `/mempool` itself answers.
+    broken: Vec<[u8; 32]>,
 }
 
 impl Explorer {
     fn new(tip: u64) -> Explorer {
-        Explorer { tip, paths: RefCell::new(Vec::new()), bodies: RefCell::new(Vec::new()), no_indexer: false, empty: false }
+        Explorer {
+            tip,
+            paths: RefCell::new(Vec::new()),
+            bodies: RefCell::new(Vec::new()),
+            no_indexer: false,
+            empty: false,
+            queue: Vec::new(),
+            gone: Vec::new(),
+            broken: Vec::new(),
+        }
+    }
+    fn with_queue(mut self, queue: &[[u8; 32]], gone: &[[u8; 32]], broken: &[[u8; 32]]) -> Explorer {
+        self.queue = queue.to_vec();
+        self.gone = gone.to_vec();
+        self.broken = broken.to_vec();
+        self
+    }
+    /// One waiting transaction in `/mempool/transaction`'s rendering:
+    /// `/block`'s, status `PENDING`, the reference padded to its sixteen
+    /// bytes as the middleware sends it.
+    fn pending_body(id: &[u8; 32]) -> String {
+        format!(
+            r#"{{"transaction":{{"transaction_identifier":{{"hash":"0x{t}"}},"operations":[{{"operation_identifier":{{"index":0}},"type":"DESTINATION_TRANSFER","status":"PENDING","account":{{"address":"0xdbc01bb8a41f3dc24b0083bb6b9efe910e2477cb"}},"amount":{{"value":"10000000","currency":{{"symbol":"MCM","decimals":9}}}},"metadata":{{"memo":"INVOICE-7"}}}},{{"operation_identifier":{{"index":1}},"type":"SOURCE_TRANSFER","status":"PENDING","account":{{"address":"0x371c388eba10f265c648008e1ad2c94e680c0f4a"}},"amount":{{"value":"-10000500","currency":{{"symbol":"MCM","decimals":9}}}}}},{{"operation_identifier":{{"index":2}},"type":"FEE","status":"PENDING","account":{{"address":"0x0000000000000000000000000000000000000000"}},"amount":{{"value":"500","currency":{{"symbol":"MCM","decimals":9}}}}}}],"metadata":{{"block_to_live":"0"}}}}}}"#,
+            t = hexs(id),
+        )
     }
     fn without_indexer(mut self) -> Explorer {
         self.no_indexer = true;
@@ -6777,6 +6820,32 @@ impl mochimo_crypto::mesh::Transport for Explorer {
                     Explorer::search_row(1_078_535, &tag_hex)
                 )
                 .into_bytes())
+            }
+            "/mempool" => {
+                if self.broken.contains(&[0; 32]) {
+                    return Ok(br#"{"code":2,"message":"Internal general error","retriable":true}"#.to_vec());
+                }
+                if self.queue.is_empty() {
+                    return Ok(br#"{"transaction_identifiers":null}"#.to_vec());
+                }
+                let ids: Vec<String> = self.queue.iter().map(|id| format!(r#"{{"hash":"0x{}"}}"#, hexs(id))).collect();
+                Ok(format!(r#"{{"transaction_identifiers":[{}]}}"#, ids.join(",")).into_bytes())
+            }
+            "/mempool/transaction" => {
+                let v: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
+                let asked = v["transaction_identifier"]["hash"].as_str().unwrap_or("").to_owned();
+                let id = self
+                    .queue
+                    .iter()
+                    .find(|id| format!("0x{}", hexs(*id)) == asked)
+                    .unwrap_or_else(|| panic!("asked for {asked}, which /mempool did not list"));
+                if self.gone.contains(id) {
+                    return Ok(br#"{"code":3,"message":"Transaction not found","retriable":true}"#.to_vec());
+                }
+                if self.broken.contains(id) {
+                    return Ok(br#"{"code":2,"message":"Internal general error","retriable":true}"#.to_vec());
+                }
+                Ok(Explorer::pending_body(id).into_bytes())
             }
             other => panic!("the explorer double was asked for {other}"),
         }
@@ -6859,7 +6928,7 @@ fn recent_transactions_escapes_memos_and_preserves_unicode() {
     row["operations"][1]["metadata"]["memo"] = json!("café 東京\nnext\t\u{1b}\u{9b}\u{202e}");
     let body = json!({"transactions": [row], "total_count": 1});
     let report = render_explorer_reply(
-        "/search/transactions", &body, &Command::RecentTransactions { tag: TAG, count: 5 },
+        "/search/transactions", &body, &Command::RecentTransactions { tag: TAG, count: 5, from: 0 },
     );
     assert_eq!(report.code, Code::Ok);
     assert!(report.text.contains("                    memo café 東京\\nnext\\t\\u{1b}\\u{9b}\\u{202e}\n"));
@@ -6908,7 +6977,7 @@ fn transaction_prints_the_indexers_rendering_and_names_the_endpoint() {
 #[test]
 fn recent_transactions_prints_a_row_per_transaction_with_its_direction() {
     let e = Explorer::new(1_078_600);
-    let r = cli::run_explorer(&MeshClient::new(e), &Command::RecentTransactions { tag: TAG, count: 5 });
+    let r = cli::run_explorer(&MeshClient::new(e), &Command::RecentTransactions { tag: TAG, count: 5, from: 0 });
     assert_eq!(r.code, Code::Ok, "{}", r.text);
     assert!(r.text.contains("1 of 1 row(s), newest first"), "{}", r.text);
     assert!(r.text.contains("block   1078535"), "{}", r.text);
@@ -6919,13 +6988,70 @@ fn recent_transactions_prints_a_row_per_transaction_with_its_direction() {
     println!("  recent-transactions: one row, direction `both`, the tag's own net -10,000,500");
 }
 
+/// **`recent-transactions --from M`**: the first page is asked for as it
+/// always was, with no offset in the body; a later one carries the offset
+/// the Mesh's handler reads, and the page says which rows it shows and how
+/// to read on.
+#[test]
+fn recent_transactions_from_sends_the_offset_and_says_which_rows_it_shows() {
+    let tag_hex = hexs(&TAG);
+    let network = r#""network_identifier":{"blockchain":"mochimo","network":"mainnet"}"#;
+    let client = MeshClient::new(Explorer::new(1_078_600));
+    let r = cli::run_explorer(&client, &Command::RecentTransactions { tag: TAG, count: 5, from: 0 });
+    assert_eq!(r.code, Code::Ok, "{}", r.text);
+    let r = cli::run_explorer(&client, &Command::RecentTransactions { tag: TAG, count: 100, from: 200 });
+    assert_eq!(r.code, Code::Ok, "{}", r.text);
+    let bodies: Vec<String> = client
+        .transport()
+        .bodies
+        .borrow()
+        .iter()
+        .map(|b| String::from_utf8_lossy(b).into_owned())
+        .collect();
+    assert_eq!(
+        bodies,
+        [
+            format!(r#"{{"account_identifier":{{"address":"0x{tag_hex}"}},"limit":5,{network}}}"#),
+            format!(r#"{{"account_identifier":{{"address":"0x{tag_hex}"}},"limit":100,{network},"offset":200}}"#),
+        ],
+        "the first page's body changed, or a later one does not carry its offset"
+    );
+    // The builder itself says what it asked for, 0 included; the verb asks
+    // for the first page without it, as above.
+    assert_eq!(
+        mochimo_crypto::mesh::codec::request_search_by_account_from(&TAG, 5, 0),
+        format!(r#"{{"account_identifier":{{"address":"0x{tag_hex}"}},"limit":5,{network},"offset":0}}"#).into_bytes(),
+        "the builder does not send an offset of 0"
+    );
+
+    // A middle page: which rows, how many in all, and the flag that reads on.
+    use serde_json::{json, Value};
+    let row: Value = serde_json::from_str(&Explorer::search_row(1_078_535, &tag_hex)).unwrap_or_else(|e| panic!("{e}"));
+    let cmd = Command::RecentTransactions { tag: TAG, count: 1, from: 100 };
+    let body = json!({"transactions": [row], "total_count": 250, "next_offset": 101});
+    let page = render_explorer_reply("/search/transactions", &body, &cmd);
+    assert_eq!(page.code, Code::Ok, "{}", page.text);
+    assert!(page.text.contains("  rows 101 to 101 of 250, newest first: the 100 newest are skipped\n"), "{}", page.text);
+    assert!(page.text.contains("the endpoint's next offset is 101, and `--from 101` reads them"), "{}", page.text);
+    assert!(!page.text.contains("(none"), "{}", page.text);
+
+    // Past the last row: an empty page, said as one, and not a refusal.
+    let cmd = Command::RecentTransactions { tag: TAG, count: 5, from: 300 };
+    let page = render_explorer_reply("/search/transactions", &json!({"transactions": [], "total_count": 250}), &cmd);
+    assert_eq!(page.code, Code::Ok, "{}", page.text);
+    assert!(page.text.contains("  0 of 250 row(s) after the 300 newest\n"), "{}", page.text);
+    assert!(page.text.contains("(none after the 300 newest: this node's index holds 250 for this tag.)"), "{}", page.text);
+    assert!(!page.text.contains("never paid"), "an offset past the end is not a tag with no history:\n{}", page.text);
+    println!("  recent-transactions --from: page 1's body unchanged, the offset sent after it, rows 101 to 101 of 250 named, --from 101 offered");
+}
+
 /// A tag the index has never seen prints an empty table and exits 0; a
 /// deployment with no indexer is a refusal that says so.
 #[test]
 fn recent_transactions_is_empty_on_no_history_and_refuses_with_no_indexer() {
     let r = cli::run_explorer(
         &MeshClient::new(Explorer::new(10).with_no_rows()),
-        &Command::RecentTransactions { tag: TAG, count: 5 },
+        &Command::RecentTransactions { tag: TAG, count: 5, from: 0 },
     );
     assert_eq!(r.code, Code::Ok, "an empty history is not a refusal:\n{}", r.text);
     assert!(r.text.contains("0 of 0 row(s)"), "{}", r.text);
@@ -6933,12 +7059,74 @@ fn recent_transactions_is_empty_on_no_history_and_refuses_with_no_indexer() {
 
     let r = cli::run_explorer(
         &MeshClient::new(Explorer::new(10).without_indexer()),
-        &Command::RecentTransactions { tag: TAG, count: 5 },
+        &Command::RecentTransactions { tag: TAG, count: 5, from: 0 },
     );
     assert_eq!(r.code, Code::Refused, "a missing indexer is not an ok page:\n{}", r.text);
     assert!(r.text.contains("indexer database"), "the refusal does not name the indexer:\n{}", r.text);
     assert!(r.text.contains("no store was opened"), "{}", r.text);
     println!("  recent-transactions: an empty index is exit 0 with an empty table; no indexer is exit 3 naming it");
+}
+
+/// **`mempool`**: the queue's size, the first `--count` of it read whole as
+/// `/block` renders a transaction, a transaction that left the queue between
+/// the list and the read said as that, and the endpoint's convention named.
+#[test]
+fn mempool_lists_the_queue_and_reads_the_first_of_it_whole() {
+    let (a, b, c) = ([0xa1u8; 32], [0xb2u8; 32], [0xc3u8; 32]);
+    let client = MeshClient::new(Explorer::new(10).with_queue(&[a, b, c], &[b], &[]));
+    let r = cli::run_explorer(&client, &Command::Mempool { count: 2 });
+    assert_eq!(r.code, Code::Ok, "{}", r.text);
+    assert!(r.text.starts_with("the mempool: 3 transaction(s) waiting to be mined; the first 2 read\n"), "{}", r.text);
+    assert!(r.text.contains(&format!("  {}  1 destination(s)  10000000 nanoMCM (0.010000000 MCM)\n", hexs(&a))), "{}", r.text);
+    assert!(r.text.contains("memo INVOICE-7"), "the destination's reference is not on the page:\n{}", r.text);
+    assert!(r.text.contains("-10000500 nanoMCM"), "the source is not debited net:\n{}", r.text);
+    assert!(
+        r.text.contains(&format!("  {}  left the queue before it was read: mined since the list was read, or dropped\n", hexs(&b))),
+        "{}",
+        r.text
+    );
+    assert!(!r.text.contains(&hexs(&c)), "a third transaction was read:\n{}", r.text);
+    assert!(r.text.contains("  1 more waiting, not read: this page reads the first 2, and --count reads up to 100\n"), "{}", r.text);
+    assert!(r.text.contains("/mempool and /mempool/transaction"), "the page does not name the endpoints:\n{}", r.text);
+    let paths = client.transport().paths.borrow().clone();
+    assert_eq!(paths, ["/mempool", "/mempool/transaction", "/mempool/transaction"]);
+    let bodies: Vec<String> = client.transport().bodies.borrow().iter().map(|b| String::from_utf8_lossy(b).into_owned()).collect();
+    let network = r#""network_identifier":{"blockchain":"mochimo","network":"mainnet"}"#;
+    assert_eq!(
+        bodies,
+        [
+            format!("{{{network}}}"),
+            format!(r#"{{{network},"transaction_identifier":{{"hash":"0x{}"}}}}"#, hexs(&a)),
+            format!(r#"{{{network},"transaction_identifier":{{"hash":"0x{}"}}}}"#, hexs(&b)),
+        ],
+        "the requests are not the bodies the handlers read"
+    );
+    println!("  mempool: 3 waiting, 2 read, one gone since the list, the rest counted, 3 requests with their bodies");
+}
+
+/// An empty queue is a page saying so and exit 0, the middleware's `null`
+/// read as no transactions; a queue that cannot be read, or a transaction in
+/// it that fails for a reason other than having left it, is a refusal that
+/// says which.
+#[test]
+fn mempool_says_an_empty_queue_and_refuses_what_it_could_not_read() {
+    let client = MeshClient::new(Explorer::new(10));
+    let r = cli::run_explorer(&client, &Command::Mempool { count: 5 });
+    assert_eq!(r.code, Code::Ok, "{}", r.text);
+    assert!(r.text.contains("the mempool: 0 transaction(s) waiting to be mined; the first 0 read\n"), "{}", r.text);
+    assert!(r.text.contains("(none: this node's queue is empty.)"), "{}", r.text);
+    assert_eq!(client.transport().paths.borrow().len(), 1, "an empty queue asked for a transaction");
+
+    let r = cli::run_explorer(&MeshClient::new(Explorer::new(10).with_queue(&[], &[], &[[0; 32]])), &Command::Mempool { count: 5 });
+    assert_eq!(r.code, Code::Refused, "{}", r.text);
+    assert!(r.text.contains("no store was opened"), "{}", r.text);
+
+    let (a, b) = ([0xa1u8; 32], [0xb2u8; 32]);
+    let r = cli::run_explorer(&MeshClient::new(Explorer::new(10).with_queue(&[a, b], &[], &[b])), &Command::Mempool { count: 5 });
+    assert_eq!(r.code, Code::Refused, "a page missing a transaction it could not read is not an ok page:\n{}", r.text);
+    assert!(r.text.contains(&format!("The queue's ids were read; transaction {} was not.", hexs(&b))), "{}", r.text);
+    assert!(!r.text.contains("destination(s)"), "the rows read before the failure were printed:\n{}", r.text);
+    println!("  mempool: an empty queue is exit 0 and says so; a queue not read, and a transaction not read, are exit 3 naming which");
 }
 
 /// **`block <number>`**: the reward reported on its own and excluded from
@@ -6976,6 +7164,74 @@ fn blocks_walks_down_from_the_tip_one_row_each() {
     // `block <n>` counts "spends" separately from this row's figure.
     assert!(r.text.contains("2 transaction(s)"), "the row does not carry a transaction count:\n{}", r.text);
     println!("  blocks: the tip and the two below it, one row each, one /block call per row");
+}
+
+/// **`block` and `blocks` name a block's kind and print its own figures**:
+/// a normal block's difficulty, root, size, count, minimum fee and haiku; a
+/// pseudo-block's without the haiku; a neogenesis block named from its
+/// number even with no metadata; and a node that sent none, said as that.
+#[test]
+fn block_and_blocks_name_the_kind_and_print_the_blocks_own_figures() {
+    use serde_json::{json, Value};
+    let with = |index: u64, metadata: Option<Value>| -> Value {
+        let mut body: Value = serde_json::from_str(&Explorer::block_body(index)).unwrap_or_else(|e| panic!("{e}"));
+        if let Some(m) = metadata {
+            body["block"]["metadata"] = m;
+        }
+        body
+    };
+    let figures = |tx_count: u64| {
+        json!({
+            "block_size": 9824, "difficulty": 37, "fee": 500,
+            "haiku": "at night \nsoft snakes \nreturning ",
+            "nonce": format!("0x{}", "0c".repeat(32)), "root": format!("0x{}", "fa".repeat(32)),
+            "stime": 1_788_500_198_000_i64, "tx_count": tx_count,
+        })
+    };
+    let page = |index: u64, metadata: Option<Value>| {
+        let r = render_explorer_reply("/block", &with(index, metadata), &Command::Block { at: args::BlockAt::Index(index) });
+        assert_eq!(r.code, Code::Ok, "{}", r.text);
+        r.text
+    };
+
+    let normal = page(1_078_535, Some(figures(4)));
+    for line in [
+        "  type     normal\n",
+        &format!("  work     difficulty 37, nonce {}\n", "0c".repeat(32)),
+        &format!("  root     {}\n", "fa".repeat(32)),
+        "  size     9824 bytes, 4 transaction(s) besides the reward, minimum fee 500 nanoMCM (0.000000500 MCM)\n",
+        "  haiku    at night / soft snakes / returning\n",
+    ] {
+        assert!(normal.contains(line), "missing {line:?}:\n{normal}");
+    }
+    assert!(normal.contains("reward   12065840589 nanoMCM"), "the page's other lines moved:\n{normal}");
+
+    let pseudo = page(1_078_535, Some(figures(0)));
+    assert!(pseudo.contains("  type     pseudo: no transactions, and no proof of work is checked for it\n"), "{pseudo}");
+    assert!(!pseudo.contains("haiku"), "a pseudo-block's nonce is not a haiku:\n{pseudo}");
+
+    let neogenesis = page(1_078_528, None);
+    assert!(neogenesis.contains("  type     neogenesis; this node sent no block metadata\n"), "{neogenesis}");
+    let bare = page(1_078_535, None);
+    assert!(bare.contains("  type     kind not sent; this node sent no block metadata\n"), "{bare}");
+    assert!(!bare.contains("  work "), "{bare}");
+
+    // A haiku the node sent with control characters stays on its own line.
+    let mut odd = figures(4);
+    odd["haiku"] = json!("one\u{1b}[2J \n\u{202e}two");
+    let escaped = page(1_078_535, Some(odd));
+    assert!(escaped.contains("  haiku    one\\u{1b}[2J / \\u{202e}two\n"), "{escaped}");
+
+    // `blocks`: each row ends with its kind; the double sends no metadata,
+    // so only the neogenesis number is named.
+    let r = cli::run_explorer(&MeshClient::new(Explorer::new(1_078_529)), &Command::Blocks { count: 3 });
+    assert_eq!(r.code, Code::Ok, "{}", r.text);
+    let rows: Vec<&str> = r.text.lines().skip(1).collect();
+    assert_eq!(rows.len(), 3, "{}", r.text);
+    assert!(rows[0].trim_start().starts_with("1078529") && rows[0].ends_with("  kind not sent"), "{}", r.text);
+    assert!(rows[1].trim_start().starts_with("1078528") && rows[1].ends_with("  neogenesis"), "{}", r.text);
+    assert!(rows[2].ends_with("  kind not sent"), "{}", r.text);
+    println!("  block: normal with its figures and haiku, pseudo without, neogenesis by number, none said; blocks rows end with the kind");
 }
 
 // ---------------------------------------------------------------------------

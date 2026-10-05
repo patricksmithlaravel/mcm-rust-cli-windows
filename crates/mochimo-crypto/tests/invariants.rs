@@ -2405,7 +2405,7 @@ fn no_wallet_visible_fn_hands_out_a_wots_signature() {
         (
             "cli/mod.rs::decide",
             Class::Entrypoint,
-            "the CLI's dispatch: it opens a Wallet -- which reconciles every account, partitions              them, and refuses outright only when none reconciled -- and calls              the wallet's own methods, so every route to a signature it has is one the gate              already holds. It hands back a Report, which is text and an exit code; nothing a              signature can be read out of. Ten commands return before a Wallet exists              (`address`, `restore`, `discover`, `status`, `reconcile`, `submit` and the four              read-only verbs), and `create` never reaches this function at all because there is              no store to hand it; none of those paths signs --              the_cli_cannot_reach_around_the_wallet checks both halves mechanically",
+            "the CLI's dispatch: it opens a Wallet -- which reconciles every account, partitions              them, and refuses outright only when none reconciled -- and calls              the wallet's own methods, so every route to a signature it has is one the gate              already holds. It hands back a Report, which is text and an exit code; nothing a              signature can be read out of. Eleven commands return before a Wallet exists              (`address`, `restore`, `discover`, `status`, `reconcile`, `submit` and the five              read-only verbs), and `create` never reaches this function at all because there is              no store to hand it; none of those paths signs --              the_cli_cannot_reach_around_the_wallet checks both halves mechanically",
         ),
     ];
     let mut unlisted: Vec<String> = Vec::new();
@@ -9727,7 +9727,7 @@ const DECLARED_PANIC_SITES: &[(&str, &str, usize, &str)] = &[
     (
         "crates/mochimo-crypto/src/cli/args.rs",
         "assert!",
-        41,
+        46,
         "inside the #[cfg(test)] parser tests: the help \
          spellings recognised before the verb, and refused by name after it; \
          the repeated-flag test's control, each flag once parsing; the \
@@ -9752,12 +9752,16 @@ const DECLARED_PANIC_SITES: &[(&str, &str, usize, &str)] = &[
          needed and the one that was not being made. Five more over the \
          plaintext-node gate: the seven spellings it lets through, and per \
          refused spelling the flag named, the decisions the link carries, the \
-         balance a spend is laid out against, and the flag clearing it.",
+         balance a spend is laid out against, and the flag clearing it. \
+         Five over `recent-transactions`' `--from`: per value above the \
+         Mesh's int64, the bounds with the value echoed and the endpoint's \
+         own reason; `--count`'s window holding beside it; the flag given \
+         twice; and `blocks` refusing it.",
     ),
     (
         "crates/mochimo-crypto/src/cli/args.rs",
         "assert_eq!",
-        29,
+        35,
         "same #[cfg(test)] module: the repeated-flag refusal, named flag by \
          flag; `address --account N`'s parsed shape and its missing-value \
          refusal; the `--ref` test's two: the \
@@ -9768,12 +9772,14 @@ const DECLARED_PANIC_SITES: &[(&str, &str, usize, &str)] = &[
          shape `all` parses to, and the file's three columns line by line. Six more: the two default counts, the ceiling \
          taken, `block 1` and the two hash spellings parsed. Three over \
          `discover`'s default `--to`, its ceiling and its floor, each parsed \
-         to the `Command` it should be.",
+         to the `Command` it should be. Six over `--from`: its default, a \
+         value, the two orders beside `--count`, the ceiling taken, and the \
+         ceiling's value written out.",
     ),
     (
         "crates/mochimo-crypto/src/cli/args.rs",
         "panic!",
-        20,
+        22,
         "same #[cfg(test)] module: `refusal`'s arm for argv that parsed when \
          the case expected a refusal; the `--ref` test's four, the \
          arms for a value that parsed to another command, was refused, or \
@@ -9783,7 +9789,8 @@ const DECLARED_PANIC_SITES: &[(&str, &str, usize, &str)] = &[
          expected to parse. Nine over the explorer parser tests: the arms for \
          argv that parsed to another command or did not parse at all. Three \
          more over `discover`'s \
-         default, ceiling and floor.",
+         default, ceiling and floor. Two over `--from`: the arms for argv \
+         that parsed to another command or did not parse at all.",
     ),
     (
         "crates/mochimo-crypto/src/keystore/mod.rs",

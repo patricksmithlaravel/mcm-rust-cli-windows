@@ -26,7 +26,7 @@ use std::path::PathBuf;
 mod mesh_walk;
 
 use mesh_walk::Plain;
-use mochimo_crypto::mesh::{codec, hex, max_response_bytes, MAX_HISTORY_RESPONSE_BYTES, MAX_RECON_RESPONSE_BYTES, MAX_REQUEST_BYTES};
+use mochimo_crypto::mesh::{self, codec, hex, max_response_bytes, MAX_HISTORY_RESPONSE_BYTES, MAX_RECON_RESPONSE_BYTES, MAX_REQUEST_BYTES};
 use mochimo_crypto::Error;
 
 const N_FILE: &str = "group_n_mesh_live.json";
@@ -584,6 +584,399 @@ fn the_captured_block_parses_with_its_reward_and_its_transactions() {
     );
 }
 
+/// **The captured block's own figures parse as the trailer holds them**, and
+/// its kind follows from them by the reference's test.
+///
+/// Every value below is read from the capture's own reply, not from this
+/// codec: `difficulty`, `fee`, `tx_count`, `block_size` and `stime` as JSON
+/// numbers, the nonce and root as `0x` and 64 hex digits, the haiku with the
+/// line breaks the middleware put in it. Four transactions besides the
+/// reward and a block number whose low byte is 7 make it a normal block.
+#[cfg(not(miri))]
+#[test]
+fn the_captured_block_carries_its_own_figures_and_reads_as_normal() {
+    let json = fixture_json(N_FILE);
+    let vectors = json["vectors"].as_array().unwrap_or_else(|| panic!("no vectors"));
+    let v = vectors
+        .iter()
+        .find(|v| v["id"].as_str() == Some("N-submit-block"))
+        .unwrap_or_else(|| panic!("no N-submit-block"));
+    let body = v["response_body"].as_str().unwrap_or("");
+    let block = codec::parse_block(body.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    let raw: serde_json::Value = serde_json::from_str(body).unwrap_or_else(|e| panic!("{e}"));
+    let recorded = &raw["block"]["metadata"];
+    let m = block.metadata.as_ref().unwrap_or_else(|| panic!("the captured block's metadata was not read"));
+    assert_eq!(Some(u64::from(m.difficulty)), recorded["difficulty"].as_u64());
+    assert_eq!(Some(m.fee), recorded["fee"].as_u64());
+    assert_eq!(Some(u64::from(m.tx_count)), recorded["tx_count"].as_u64());
+    assert_eq!(Some(m.block_size), recorded["block_size"].as_u64());
+    assert_eq!(Some(m.stime_ms), recorded["stime"].as_i64());
+    assert_eq!(m.stime_ms, block.timestamp_ms, "the trailer's stime is the block's timestamp");
+    assert_eq!(Some(m.haiku.as_str()), recorded["haiku"].as_str());
+    let hexed = |b: &[u8; 32]| format!("0x{}", b.iter().map(|x| format!("{x:02x}")).collect::<String>());
+    assert_eq!(Some(hexed(&m.nonce).as_str()), recorded["nonce"].as_str());
+    assert_eq!(Some(hexed(&m.root).as_str()), recorded["root"].as_str());
+    assert_eq!(m.tx_count, 4, "the captured block no longer counts four transactions");
+    assert_eq!(block.transactions.len(), 5, "four and the reward");
+    assert_eq!(block.block.index & 0xff, 7);
+    assert_eq!(block.kind(), Some(codec::BlockKind::Normal));
+    println!(
+        "  captured block 1,078,535: difficulty {}, {} transaction(s), fee floor {}, {} bytes, normal",
+        m.difficulty, m.tx_count, m.fee, m.block_size
+    );
+}
+
+/// **A block's metadata is read whole or not at all, and a value of the wrong
+/// shape is refused by name**; its kind follows the reference's test.
+///
+/// The reply below is the capture's shape with each case's change. A reply
+/// with no `metadata`, or with one of the eight keys missing, reads with
+/// none, so a deployment that writes fewer still has its blocks read; a
+/// value there that does not fit its field refuses the whole reply, naming
+/// the key, as every other field does.
+#[cfg(not(miri))]
+#[test]
+fn block_metadata_is_whole_or_absent_and_a_misshapen_value_is_refused_by_name() {
+    use serde_json::{json, Value};
+    let zero = format!("0x{}", "00".repeat(32));
+    let body = |index: u64, edit: &dyn Fn(&mut Value)| -> Vec<u8> {
+        let mut v = json!({"block": {
+            "block_identifier": {"index": index, "hash": zero},
+            "parent_block_identifier": {"index": index.saturating_sub(1), "hash": zero},
+            "timestamp": 1_788_500_198_000_i64,
+            "transactions": [],
+            "metadata": {
+                "block_size": 9824, "difficulty": 37, "fee": 500,
+                "haiku": "at night \nsoft snakes \nreturning ",
+                "nonce": format!("0x{}", "0c".repeat(32)), "root": format!("0x{}", "fa".repeat(32)),
+                "stime": 1_788_500_198_000_i64, "tx_count": 4,
+            },
+        }});
+        edit(&mut v);
+        serde_json::to_vec(&v).unwrap_or_else(|e| panic!("{e}"))
+    };
+    let read = |b: Vec<u8>| codec::parse_block(&b).unwrap_or_else(|e| panic!("{e}"));
+
+    let whole = read(body(1_078_535, &|_| {}));
+    assert!(whole.metadata.is_some());
+    assert_eq!(whole.kind(), Some(codec::BlockKind::Normal));
+
+    // Absent, null, or one key short: read as none, and the block still reads.
+    let none = read(body(1_078_535, &|v| {
+        v["block"].as_object_mut().map(|b| b.remove("metadata"));
+    }));
+    assert_eq!(none.metadata, None);
+    assert_eq!(none.kind(), None, "with no count, only a neogenesis number names a kind");
+    let null = read(body(1_078_535, &|v| v["block"]["metadata"] = Value::Null));
+    assert_eq!(null.metadata, None);
+    for key in ["block_size", "difficulty", "fee", "haiku", "nonce", "root", "stime", "tx_count"] {
+        let short = read(body(1_078_535, &|v| {
+            v["block"]["metadata"].as_object_mut().map(|m| m.remove(key));
+        }));
+        assert_eq!(short.metadata, None, "metadata without {key} was read");
+    }
+
+    // The kind, by the reference's test: no transactions is pseudo; a number
+    // whose low byte is zero is neogenesis whatever the count, and with no
+    // metadata at all.
+    let pseudo = read(body(1_078_535, &|v| v["block"]["metadata"]["tx_count"] = json!(0)));
+    assert_eq!(pseudo.kind(), Some(codec::BlockKind::Pseudo));
+    assert_eq!(read(body(1_078_528, &|_| {})).kind(), Some(codec::BlockKind::Neogenesis));
+    let neogenesis_bare = read(body(1_078_528, &|v| {
+        v["block"].as_object_mut().map(|b| b.remove("metadata"));
+    }));
+    assert_eq!(neogenesis_bare.kind(), Some(codec::BlockKind::Neogenesis));
+    assert_eq!(read(body(1_078_529, &|_| {})).kind(), Some(codec::BlockKind::Normal));
+
+    // A value that does not fit is refused, naming the key.
+    let refused: [(&str, Value, &str); 7] = [
+        ("difficulty", json!(4_294_967_296_u64), "metadata.difficulty"),
+        ("tx_count", json!("4"), "metadata.tx_count"),
+        ("fee", json!(-1), "metadata.fee"),
+        ("block_size", json!(1.5), "metadata.block_size"),
+        ("stime", json!("1788500198000"), "metadata.stime"),
+        ("haiku", json!("x".repeat(codec::MAX_HAIKU_BYTES + 1)), "metadata.haiku: too long"),
+        ("haiku", json!(7), "metadata.haiku"),
+    ];
+    for (key, value, want) in refused {
+        let b = body(1_078_535, &|v| v["block"]["metadata"][key] = value.clone());
+        match codec::parse_block(&b) {
+            Err(Error::MeshResponse { what }) => assert_eq!(what, want, "{key}"),
+            other => panic!("{key} = {value} was not refused as {want}: {other:?}"),
+        }
+    }
+    let longest = read(body(1_078_535, &|v| v["block"]["metadata"]["haiku"] = json!("x".repeat(codec::MAX_HAIKU_BYTES))));
+    assert_eq!(longest.metadata.map(|m| m.haiku.len()), Some(codec::MAX_HAIKU_BYTES));
+    // A hash one byte long is refused by its length, and one with no `0x` as
+    // hex at offset 0, each naming the key.
+    for key in ["nonce", "root"] {
+        let b = body(1_078_535, &|v| v["block"]["metadata"][key] = json!("0x00"));
+        assert!(
+            matches!(codec::parse_block(&b), Err(Error::Length { what, expected: 32, got: 1 }) if what == format!("metadata.{key}")),
+            "a short {key} was not refused by name"
+        );
+        let b = body(1_078_535, &|v| v["block"]["metadata"][key] = json!("00".repeat(32)));
+        assert!(
+            matches!(codec::parse_block(&b), Err(Error::Hex { what, offset: 0 }) if what == format!("metadata.{key}")),
+            "a {key} with no 0x was not refused by name"
+        );
+    }
+    let b = body(1_078_535, &|v| v["block"]["metadata"] = json!([1, 2]));
+    assert!(matches!(codec::parse_block(&b), Err(Error::MeshResponse { what: "metadata" })), "metadata that is not an object was not refused");
+    println!("  block metadata: read whole or as none (absent, null, eight keys one short); 7 shapes and 2 hashes two ways refused by name; pseudo, neogenesis and normal by the reference's test");
+}
+
+/// **The captured status reads whole, and the captured list names its one
+/// network**, every value compared against the capture's own reply.
+#[cfg(not(miri))]
+#[test]
+fn the_captured_status_and_list_read_whole() {
+    let json = fixture_json(N_FILE);
+    let vectors = json["vectors"].as_array().unwrap_or_else(|| panic!("no vectors"));
+    let reply = |id: &str| -> String {
+        vectors
+            .iter()
+            .find(|v| v["id"].as_str() == Some(id))
+            .and_then(|v| v["response_body"].as_str())
+            .unwrap_or_else(|| panic!("no {id}"))
+            .to_owned()
+    };
+    let status = reply("N-network-status");
+    let raw: serde_json::Value = serde_json::from_str(&status).unwrap_or_else(|e| panic!("{e}"));
+    let full = codec::parse_network_status_full(status.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(Some(full.tip.index), raw["current_block_identifier"]["index"].as_u64());
+    assert_eq!(Some(full.tip_timestamp_ms), raw["current_block_timestamp"].as_i64());
+    assert_eq!(full.tip_timestamp_ms, 1_788_539_881_000);
+    assert_eq!(Some(full.genesis.index), raw["genesis_block_identifier"]["index"].as_u64());
+    assert_eq!(
+        Some(format!("0x{}", hex::encode(&full.genesis.hash)).as_str()),
+        raw["genesis_block_identifier"]["hash"].as_str()
+    );
+    assert_eq!(
+        full.sync,
+        Some(codec::SyncStatus { stage: "synchronized".to_owned(), synced: true })
+    );
+    let list = codec::parse_network_identifiers(reply("N-network-list").as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(list, [codec::NetworkIdentifier { blockchain: "mochimo".to_owned(), network: "mainnet".to_owned() }]);
+    println!(
+        "  captured status: tip {} solved at {} ms, genesis 0, synchronized; captured list: mochimo mainnet",
+        full.tip.index, full.tip_timestamp_ms
+    );
+}
+
+/// **The full status and the network list refuse what does not fit, by
+/// name**, and take an absent sync state as none.
+#[cfg(not(miri))]
+#[test]
+fn the_full_status_and_the_network_list_refuse_by_field() {
+    use serde_json::{json, Value};
+    let zero = format!("0x{}", "00".repeat(32));
+    let status = |edit: &dyn Fn(&mut Value)| -> Vec<u8> {
+        let mut v = json!({
+            "current_block_identifier": {"index": 1_078_875, "hash": zero},
+            "current_block_timestamp": 1_788_539_881_000_i64,
+            "genesis_block_identifier": {"index": 0, "hash": zero},
+            "oldest_block_identifier": {"index": 0, "hash": ""},
+            "sync_status": {"stage": "synchronized", "synced": true},
+        });
+        edit(&mut v);
+        serde_json::to_vec(&v).unwrap_or_else(|e| panic!("{e}"))
+    };
+    let whole = codec::parse_network_status_full(&status(&|_| {})).unwrap_or_else(|e| panic!("{e}"));
+    assert!(whole.sync.is_some());
+    for absent in [None, Some(Value::Null)] {
+        let b = status(&|v| match &absent {
+            None => {
+                v.as_object_mut().map(|m| m.remove("sync_status"));
+            }
+            Some(null) => v["sync_status"] = null.clone(),
+        });
+        let read = codec::parse_network_status_full(&b).unwrap_or_else(|e| panic!("{e}"));
+        assert_eq!(read.sync, None, "an absent sync state was not read as none");
+    }
+    /// One change to the reply, erased to the shape the table shares.
+    type Edit = dyn Fn(&mut Value);
+    let refused: [(&Edit, &str); 7] = [
+        (&|v| { v.as_object_mut().map(|m| m.remove("current_block_timestamp")); }, "current_block_timestamp"),
+        (&|v| v["current_block_timestamp"] = json!(1.5), "current_block_timestamp"),
+        (&|v| { v.as_object_mut().map(|m| m.remove("genesis_block_identifier")); }, "genesis_block_identifier.index"),
+        (&|v| v["sync_status"] = json!("synchronized"), "sync_status"),
+        (&|v| { v["sync_status"].as_object_mut().map(|m| m.remove("stage")); }, "sync_status.stage"),
+        (&|v| v["sync_status"]["stage"] = json!("x".repeat(codec::MAX_SYNC_STAGE_BYTES + 1)), "sync_status.stage"),
+        (&|v| v["sync_status"]["synced"] = json!("true"), "sync_status.synced"),
+    ];
+    for (edit, want) in refused {
+        match codec::parse_network_status_full(&status(edit)) {
+            Err(Error::MeshResponse { what }) => assert_eq!(what, want),
+            other => panic!("{want} was not refused: {other:?}"),
+        }
+    }
+    let longest = status(&|v| v["sync_status"]["stage"] = json!("x".repeat(codec::MAX_SYNC_STAGE_BYTES)));
+    assert!(codec::parse_network_status_full(&longest).is_ok(), "the longest stage was refused");
+
+    let list = |entries: Value| serde_json::to_vec(&json!({"network_identifiers": entries})).unwrap_or_else(|e| panic!("{e}"));
+    let one = json!({"blockchain": "mochimo", "network": "mainnet"});
+    let many: Vec<Value> = (0..=codec::MAX_NETWORKS).map(|_| one.clone()).collect();
+    let cases: [(Vec<u8>, &str); 4] = [
+        (list(json!(many)), "network_identifiers: too many"),
+        (list(json!([{"blockchain": "mochimo", "network": "x".repeat(codec::MAX_NETWORK_NAME_BYTES + 1)}])), "network_identifiers[].network"),
+        (list(json!([{"network": "mainnet"}])), "network_identifiers[].blockchain"),
+        (list(json!("mainnet")), "network_identifiers: array"),
+    ];
+    for (b, want) in cases {
+        match codec::parse_network_identifiers(&b) {
+            Err(Error::MeshResponse { what }) => assert_eq!(what, want),
+            other => panic!("{want} was not refused: {other:?}"),
+        }
+    }
+    let at_most: Vec<Value> = (0..codec::MAX_NETWORKS).map(|_| one.clone()).collect();
+    assert_eq!(codec::parse_network_identifiers(&list(json!(at_most))).map(|l| l.len()).ok(), Some(codec::MAX_NETWORKS));
+    println!("  network status: 7 refusals by name, an absent or null sync state read as none; network list: 4 refusals by name, {} entries taken", codec::MAX_NETWORKS);
+}
+
+/// **`network_status_full` and `networks` post to their endpoints with the
+/// bodies the codec builds**, and hand back what the replies say.
+#[cfg(not(miri))]
+#[test]
+fn the_two_network_reads_post_where_they_say() {
+    use std::cell::RefCell;
+    struct Recorder {
+        posted: RefCell<Vec<(String, Vec<u8>)>>,
+        status: Vec<u8>,
+        list: Vec<u8>,
+    }
+    impl mesh::Transport for Recorder {
+        fn post(&self, path: &str, body: &[u8]) -> Result<Vec<u8>, Error> {
+            self.posted.borrow_mut().push((path.to_owned(), body.to_vec()));
+            Ok(match path {
+                "/network/status" => self.status.clone(),
+                "/network/list" => self.list.clone(),
+                other => panic!("posted to {other}"),
+            })
+        }
+    }
+    let json = fixture_json(N_FILE);
+    let vectors = json["vectors"].as_array().unwrap_or_else(|| panic!("no vectors"));
+    let reply = |id: &str| -> Vec<u8> {
+        vectors
+            .iter()
+            .find(|v| v["id"].as_str() == Some(id))
+            .and_then(|v| v["response_body"].as_str())
+            .unwrap_or_else(|| panic!("no {id}"))
+            .as_bytes()
+            .to_vec()
+    };
+    let client = mesh::MeshClient::new(Recorder {
+        posted: RefCell::new(Vec::new()),
+        status: reply("N-network-status"),
+        list: reply("N-network-list"),
+    });
+    let full = client.network_status_full().unwrap_or_else(|e| panic!("{e}"));
+    let named = client.networks().unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(full.tip.index, 1_078_875);
+    assert_eq!(named.len(), 1);
+    let posted = client.transport().posted.borrow().clone();
+    assert_eq!(
+        posted,
+        [
+            ("/network/status".to_owned(), codec::request_network_status()),
+            ("/network/list".to_owned(), codec::request_network_list()),
+        ]
+    );
+    println!("  network reads: /network/status and /network/list, each once, with the codec's bodies");
+}
+
+/// **The mempool's two replies parse, and refuse what does not fit, by
+/// name.** No group N vector records either endpoint, so the shapes are the
+/// handlers' at the pinned commit: `/mempool` lists `{"hash": "0x…"}` objects,
+/// and Go's nil list for an empty queue encodes as `null`;
+/// `/mempool/transaction` is `/block/transaction`'s shape.
+#[cfg(not(miri))]
+#[test]
+fn the_mempool_replies_parse_and_refuse_by_field() {
+    use serde_json::json;
+    let id = |b: u8| format!("0x{}", hex::encode(&[b; 32]));
+    let listed = codec::parse_mempool(json!({"transaction_identifiers": [{"hash": id(0xa1)}, {"hash": id(0xb2)}]}).to_string().as_bytes())
+        .unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(listed, [[0xa1; 32], [0xb2; 32]], "the ids are not the queue's, in its order");
+    let empty = codec::parse_mempool(br#"{"transaction_identifiers":null}"#).unwrap_or_else(|e| panic!("{e}"));
+    assert!(empty.is_empty(), "an empty queue's null was not read as none");
+    let none = codec::parse_mempool(br#"{"transaction_identifiers":[]}"#).unwrap_or_else(|e| panic!("{e}"));
+    assert!(none.is_empty());
+
+    // Past the row bound with entries small enough to fit the size cap, so
+    // the bound itself is what refuses; at full width a list that long is
+    // already over the cap and refused by size, below.
+    let too_many: Vec<serde_json::Value> = (0..=4096).map(|_| json!({"hash": ""})).collect();
+    let cases: [(String, &str); 4] = [
+        (json!({}).to_string(), "transaction_identifiers"),
+        (json!({"transaction_identifiers": "0x00"}).to_string(), "transaction_identifiers: array"),
+        (json!({"transaction_identifiers": too_many}).to_string(), "transaction_identifiers: too many"),
+        (json!({"transaction_identifiers": [{"id": id(0)}]}).to_string(), "transaction_identifiers[].hash"),
+    ];
+    for (body, want) in cases {
+        match codec::parse_mempool(body.as_bytes()) {
+            Err(Error::MeshResponse { what }) => assert_eq!(what, want),
+            other => panic!("{want} was not refused: {other:?}"),
+        }
+    }
+    let wide: Vec<serde_json::Value> = (0..4000).map(|_| json!({"hash": id(0)})).collect();
+    assert!(
+        matches!(
+            codec::parse_mempool(json!({"transaction_identifiers": wide}).to_string().as_bytes()),
+            Err(Error::PayloadTooLarge { max: MAX_HISTORY_RESPONSE_BYTES, .. })
+        ),
+        "a queue list over the history cap was not refused by size"
+    );
+    assert!(
+        matches!(
+            codec::parse_mempool(json!({"transaction_identifiers": [{"hash": "0x00"}]}).to_string().as_bytes()),
+            Err(Error::Length { what: "transaction_identifiers[].hash", expected: 32, got: 1 })
+        ),
+        "a short id was not refused by its length"
+    );
+    // The handler's own error, through a 200, as every endpoint's.
+    assert!(matches!(
+        codec::parse_mempool(br#"{"code":2,"message":"Internal general error","retriable":true}"#),
+        Err(Error::Mesh { code: 2, .. })
+    ));
+    assert!(matches!(
+        codec::parse_mempool_transaction(br#"{"code":3,"message":"Transaction not found","retriable":true}"#),
+        Err(Error::Mesh { code: 3, .. })
+    ));
+
+    // One waiting transaction: /block's rendering, so /block/transaction's
+    // parser reads it, the reference with it.
+    let pending = json!({"transaction": {
+        "transaction_identifier": {"hash": id(0xa1)},
+        "operations": [
+            {"operation_identifier": {"index": 0}, "type": "DESTINATION_TRANSFER", "status": "PENDING",
+             "account": {"address": "0xdbc01bb8a41f3dc24b0083bb6b9efe910e2477cb"}, "amount": {"value": "10000000"},
+             "metadata": {"memo": "AB-00-EF\0\0\0\0\0\0\0\0"}},
+            {"operation_identifier": {"index": 1}, "type": "SOURCE_TRANSFER", "status": "PENDING",
+             "account": {"address": "0x371c388eba10f265c648008e1ad2c94e680c0f4a"}, "amount": {"value": "-10000500"}},
+            {"operation_identifier": {"index": 2}, "type": "FEE", "status": "PENDING",
+             "account": {"address": "0x0000000000000000000000000000000000000000"}, "amount": {"value": "500"}},
+        ],
+        "metadata": {"block_to_live": "0"},
+    }})
+    .to_string();
+    let t = codec::parse_mempool_transaction(pending.as_bytes()).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(t, codec::parse_block_transaction(pending.as_bytes()).unwrap_or_else(|e| panic!("{e}")));
+    assert_eq!(t.hash, [0xa1; 32]);
+    assert_eq!(t.operations.len(), 3);
+    assert_eq!(t.operations[0].memo, "AB-00-EF\0\0\0\0\0\0\0\0", "the reference is kept as the middleware sent it");
+
+    // The request bodies the handlers read.
+    assert_eq!(codec::request_mempool(), br#"{"network_identifier":{"blockchain":"mochimo","network":"mainnet"}}"#.to_vec());
+    assert_eq!(
+        codec::request_mempool_transaction(&[0xab; 32]),
+        format!(r#"{{"network_identifier":{{"blockchain":"mochimo","network":"mainnet"}},"transaction_identifier":{{"hash":"0x{}"}}}}"#, "ab".repeat(32)).into_bytes(),
+        "the id is not sent as the handler's fmt.Sprintf(\"0x%x\") spells it"
+    );
+    println!("  mempool: ids in the queue's order, null read as none, 4 shapes, a short id and a list over the cap refused, a waiting transaction read as /block renders one");
+}
+
 /// **The response cap and the field-by-field refusal hold for the three new
 /// **The history cap fits what `--count` accepts, and the reconciliation cap
 /// does not have to.**
@@ -637,10 +1030,10 @@ const _: () = assert!(
 #[cfg(not(miri))]
 #[test]
 fn every_endpoint_resolves_to_the_cap_its_replies_need() {
-    for path in ["/call", "/account/balance", "/network/status", "/construction/submit"] {
+    for path in ["/call", "/account/balance", "/network/status", "/network/list", "/construction/submit"] {
         assert_eq!(max_response_bytes(path), MAX_RECON_RESPONSE_BYTES, "{path}");
     }
-    for path in ["/block", "/search/transactions"] {
+    for path in ["/block", "/search/transactions", "/mempool", "/mempool/transaction"] {
         assert_eq!(max_response_bytes(path), MAX_HISTORY_RESPONSE_BYTES, "{path}");
     }
     // A path this table does not name is not a reason to widen an allocation.

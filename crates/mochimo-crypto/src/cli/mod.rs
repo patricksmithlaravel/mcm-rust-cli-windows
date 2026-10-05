@@ -66,7 +66,7 @@ use crate::wallet::Wallet;
 use crate::{Error, Result, Secret};
 
 use args::{Command, Spend};
-use outcome::{AccountLine, Decided, Outcome};
+use outcome::{AccountLine, Decided, MempoolRow, Outcome};
 
 /// What the process exits with. A refusal is never `0`.
 ///
@@ -281,11 +281,12 @@ pub fn decide<M: Medium, T: Transport>(
         Command::LookupTransaction { hash } => {
             return before_the_gate(cmd_transaction(&client, hash))
         }
-        Command::RecentTransactions { tag, count } => {
-            return before_the_gate(cmd_recent_transactions(&client, tag, *count))
+        Command::RecentTransactions { tag, count, from } => {
+            return before_the_gate(cmd_recent_transactions_from(&client, tag, *count, *from))
         }
         Command::Block { at } => return before_the_gate(cmd_block(&client, at)),
         Command::Blocks { count } => return before_the_gate(cmd_blocks(&client, *count)),
+        Command::Mempool { count } => return before_the_gate(cmd_mempool(&client, *count)),
         Command::Status { tag, scan_to } => {
             return before_the_gate(cmd_status(&store, &client, tag, master, *scan_to))
         }
@@ -337,7 +338,8 @@ pub fn decide<M: Medium, T: Transport>(
         | Command::LookupTransaction { .. }
         | Command::RecentTransactions { .. }
         | Command::Block { .. }
-        | Command::Blocks { .. } => Outcome::HandledBeforeTheWallet,
+        | Command::Blocks { .. }
+        | Command::Mempool { .. } => Outcome::HandledBeforeTheWallet,
         Command::Balance => cmd_balance(&w),
         Command::Settle { tag } => cmd_settle(&mut w, tag, master),
         Command::Send(s) => cmd_send(&mut w, s, master),
@@ -1150,21 +1152,24 @@ pub fn run_submit<T: Transport>(client: &MeshClient<T>, artifact_hex: &str) -> R
     render::render(&before_the_gate(cmd_submit(client, artifact_hex)))
 }
 
-/// The four read-only verbs for the binary, which reaches them **before the
+/// The five read-only verbs for the binary, which reaches them **before the
 /// password prompt and before any store is opened**, exactly as it reaches
 /// `submit`.
 ///
 /// `--dir` is still required of them by the parser, as of every verb, and is
 /// not read, created or locked: an operator can ask a node about a block
 /// with no wallet on the machine at all. A command this is called with that
-/// is not one of the four is a caller error, and is reported as one rather
+/// is not one of the five is a caller error, and is reported as one rather
 /// than silently doing nothing.
 pub fn run_explorer<T: Transport>(client: &MeshClient<T>, command: &Command) -> Report {
     let outcome = match command {
         Command::LookupTransaction { hash } => cmd_transaction(client, hash),
-        Command::RecentTransactions { tag, count } => cmd_recent_transactions(client, tag, *count),
+        Command::RecentTransactions { tag, count, from } => {
+            cmd_recent_transactions_from(client, tag, *count, *from)
+        }
         Command::Block { at } => cmd_block(client, at),
         Command::Blocks { count } => cmd_blocks(client, *count),
+        Command::Mempool { count } => cmd_mempool(client, *count),
         other => Outcome::NotAReadOnlyVerb {
             command: Box::new(other.clone()),
         },
@@ -1483,6 +1488,30 @@ pub fn cmd_recent_transactions<T: Transport>(
     match client.search_by_account(tag, count) {
         Ok(page) => Outcome::RecentTransactions {
             tag: *tag,
+            from: 0,
+            page: Box::new(page),
+        },
+        Err(cause) => Outcome::ExplorerFailed { cause },
+    }
+}
+
+/// `recent-transactions <tag> [--count N] [--from M]`: what touched a tag,
+/// newest first, the `from` newest skipped. With `from` 0 it sends the
+/// request [`cmd_recent_transactions`] sends, byte for byte, so the first
+/// page is asked for as it always was.
+pub fn cmd_recent_transactions_from<T: Transport>(
+    client: &MeshClient<T>,
+    tag: &Tag,
+    count: u64,
+    from: u64,
+) -> Outcome {
+    if from == 0 {
+        return cmd_recent_transactions(client, tag, count);
+    }
+    match client.search_by_account_from(tag, count, from) {
+        Ok(page) => Outcome::RecentTransactions {
+            tag: *tag,
+            from,
             page: Box::new(page),
         },
         Err(cause) => Outcome::ExplorerFailed { cause },
@@ -1528,6 +1557,31 @@ pub fn cmd_blocks<T: Transport>(client: &MeshClient<T>, count: u64) -> Outcome {
         }
     }
     Outcome::Blocks { count, tip, rows }
+}
+
+/// `mempool [--count N]`: the node's queue, its ids and the first `count`
+/// of them read whole.
+///
+/// A transaction the queue no longer holds when it is asked for -- code 3,
+/// *Transaction not found* -- has been mined since the list was read, or
+/// dropped, and its row says so: that is the queue moving, not a failure.
+/// Any other failure discards the rows read so far, as `blocks` does: a page
+/// listing some of the queue reads as the whole of it.
+pub fn cmd_mempool<T: Transport>(client: &MeshClient<T>, count: u64) -> Outcome {
+    let ids = match client.mempool() {
+        Ok(ids) => ids,
+        Err(cause) => return Outcome::ExplorerFailed { cause },
+    };
+    let mut rows = Vec::new();
+    for id in ids.iter().take(usize::try_from(count).unwrap_or(usize::MAX)) {
+        let transaction = match client.mempool_transaction(id) {
+            Ok(t) => Some(Box::new(t)),
+            Err(Error::Mesh { code: 3, .. }) => None,
+            Err(cause) => return Outcome::MempoolStopped { id: *id, cause },
+        };
+        rows.push(MempoolRow { id: *id, transaction });
+    }
+    Outcome::Mempool { count, total: ids.len(), rows }
 }
 
 /// A failed explorer read, said in the operator's terms.

@@ -372,7 +372,7 @@ fn outcome(outcome: &Outcome) -> Report {
              node.",
             hex_bytes(hash)
         )),
-        Outcome::RecentTransactions { tag, page } => recent_transactions(tag, page),
+        Outcome::RecentTransactions { tag, from, page } => recent_transactions(tag, *from, page),
         Outcome::Block { block } => block_page(block),
         Outcome::BlockNotServed { by_hash, cause } => {
             let mut text = super::explorer_refusal(cause);
@@ -389,6 +389,12 @@ fn outcome(outcome: &Outcome) -> Report {
         Outcome::BlocksStopped { index, cause } => Report::refused(format!(
             "{}\n  The tip was read; block {index} was not.",
             super::explorer_refusal(cause)
+        )),
+        Outcome::Mempool { count, total, rows } => mempool(*count, *total, rows),
+        Outcome::MempoolStopped { id, cause } => Report::refused(format!(
+            "{}\n  The queue's ids were read; transaction {} was not.",
+            super::explorer_refusal(cause),
+            hex_bytes(id)
         )),
         Outcome::ExplorerFailed { cause } => Report::refused(super::explorer_refusal(cause)),
 
@@ -855,6 +861,7 @@ fn transaction(page: &crate::mesh::codec::SearchPage) -> Report {
 
 fn recent_transactions(
     tag: &crate::addr::Tag,
+    from: u64,
     page: &crate::mesh::codec::SearchPage,
 ) -> Report {
     use crate::mesh::codec;
@@ -862,16 +869,36 @@ fn recent_transactions(
         Ok(d) => d,
         Err(e) => return cannot_render(tag, &e),
     };
-    let mut out = format!(
-        "recent transactions for {shown}\n  {} of {} row(s), newest first\n",
-        page.transactions.len(),
-        page.total_count
-    );
-    if page.transactions.is_empty() {
+    let rows = page.transactions.len() as u64;
+    let mut out = if from == 0 {
+        format!(
+            "recent transactions for {shown}\n  {} of {} row(s), newest first\n",
+            rows, page.total_count
+        )
+    } else if rows == 0 {
+        format!(
+            "recent transactions for {shown}\n  0 of {} row(s) after the {from} newest\n",
+            page.total_count
+        )
+    } else {
+        format!(
+            "recent transactions for {shown}\n  rows {} to {} of {}, newest first: the {from} newest \
+             are skipped\n",
+            from.saturating_add(1),
+            from.saturating_add(rows),
+            page.total_count
+        )
+    };
+    if page.transactions.is_empty() && from == 0 {
         out.push_str(
             "  (none: this node's index holds no transaction for this tag. A tag never paid has \
              none; so has every tag when the deployment runs no indexer.)\n",
         );
+    } else if page.transactions.is_empty() {
+        out.push_str(&format!(
+            "  (none after the {from} newest: this node's index holds {} for this tag.)\n",
+            page.total_count
+        ));
     }
     for tx in &page.transactions {
         let touched: i128 = tx
@@ -910,7 +937,9 @@ fn recent_transactions(
         }
     }
     if let Some(n) = page.next_offset {
-        out.push_str(&format!("  more rows exist; the endpoint's next offset is {n}\n"));
+        out.push_str(&format!(
+            "  more rows exist; the endpoint's next offset is {n}, and `--from {n}` reads them\n"
+        ));
     }
     out.push_str(&format!("\n{}\n", super::SEARCH_CONVENTION));
     Report::ok(out)
@@ -945,6 +974,7 @@ fn block_page(block: &crate::mesh::codec::MeshBlock) -> Report {
         hex_bytes(&block.parent.hash),
         super::stamp(block.timestamp_ms)
     );
+    out.push_str(&block_figures(block));
     match rewards.first().and_then(|t| t.operations.iter().find(|o| o.kind == codec::OP_REWARD)) {
         Some(r) => {
             out.push_str(&format!("  reward   {}\n    to     {}\n", super::nano_and_mcm(r.amount), super::explorer_address(&r.address)));
@@ -977,16 +1007,122 @@ fn block_page(block: &crate::mesh::codec::MeshBlock) -> Report {
     Report::ok(out)
 }
 
+/// The sentence every page that reads the node's queue carries.
+const MEMPOOL_CONVENTION: &str = "read from /mempool and /mempool/transaction, which render a waiting \
+     transaction as /block renders one: the source debited its NET amount and the change not an \
+     operation. The queue is the node's own; another node's may differ.";
+
+fn mempool(count: u64, total: usize, rows: &[super::outcome::MempoolRow]) -> Report {
+    use crate::mesh::codec;
+    let mut out = format!(
+        "the mempool: {total} transaction(s) waiting to be mined; the first {} read\n",
+        rows.len()
+    );
+    if total == 0 {
+        out.push_str("  (none: this node's queue is empty.)\n");
+    }
+    for row in rows {
+        match &row.transaction {
+            Some(t) => {
+                let sent: i128 = t
+                    .operations
+                    .iter()
+                    .filter(|o| o.kind == codec::OP_DESTINATION)
+                    .map(|o| o.amount)
+                    .sum();
+                let destinations = t.operations.iter().filter(|o| o.kind == codec::OP_DESTINATION).count();
+                out.push_str(&format!(
+                    "  {}  {} destination(s)  {}\n",
+                    hex_bytes(&row.id),
+                    destinations,
+                    super::nano_and_mcm(sent)
+                ));
+                out.push_str(&super::operation_lines(&t.operations, "    "));
+            }
+            None => out.push_str(&format!(
+                "  {}  left the queue before it was read: mined since the list was read, or dropped\n",
+                hex_bytes(&row.id)
+            )),
+        }
+    }
+    if total > rows.len() {
+        out.push_str(&format!(
+            "  {} more waiting, not read: this page reads the first {count}, and --count reads up to \
+             {}\n",
+            total - rows.len(),
+            super::args::MAX_COUNT
+        ));
+    }
+    out.push_str(&format!("\n{MEMPOOL_CONVENTION}\n"));
+    Report::ok(out)
+}
+
 fn blocks(count: u64, tip: &crate::mesh::ChainTip, rows: &[crate::mesh::codec::MeshBlock]) -> Report {
     let mut out = format!("the {count} newest block(s); the tip is {}\n", tip.index);
     for b in rows {
         out.push_str(&format!(
-            "  {:>9}  {}  {}  {} transaction(s)\n",
+            "  {:>9}  {}  {}  {} transaction(s)  {}\n",
             b.block.index,
             hex_bytes(&b.block.hash),
             super::stamp(b.timestamp_ms),
-            b.transactions.len()
+            b.transactions.len(),
+            kind_word(b.kind())
         ));
     }
     Report::ok(out)
+}
+
+/// A block's kind as a page names it, or that the node sent nothing to tell
+/// it by.
+fn kind_word(kind: Option<crate::mesh::codec::BlockKind>) -> &'static str {
+    use crate::mesh::codec::BlockKind;
+    match kind {
+        Some(BlockKind::Normal) => "normal",
+        Some(BlockKind::Pseudo) => "pseudo",
+        Some(BlockKind::Neogenesis) => "neogenesis",
+        None => "kind not sent",
+    }
+}
+
+/// The lines `block` prints from the block's own figures: its kind and
+/// difficulty, its size, count and minimum fee, its Merkle root and nonce,
+/// and for a normal block the haiku, one display line per line the node
+/// sent, joined. A node that sent no metadata gets one line saying so, and
+/// a neogenesis block is still named from its number.
+fn block_figures(block: &crate::mesh::codec::MeshBlock) -> String {
+    use crate::mesh::codec::BlockKind;
+    let kind = block.kind();
+    let Some(m) = &block.metadata else {
+        return format!(
+            "  type     {}; this node sent no block metadata\n",
+            kind_word(kind)
+        );
+    };
+    let what = match kind {
+        Some(BlockKind::Pseudo) => "pseudo: no transactions, and no proof of work is checked for it",
+        Some(BlockKind::Neogenesis) => "neogenesis: it carries the ledger, at every 256th block",
+        _ => "normal",
+    };
+    let mut out = format!(
+        "  type     {what}\n  work     difficulty {}, nonce {}\n  root     {}\n  size     {} bytes, {} transaction(s) besides the reward, minimum fee {}\n",
+        m.difficulty,
+        hex_bytes(&m.nonce),
+        hex_bytes(&m.root),
+        m.block_size,
+        m.tx_count,
+        super::nano_and_mcm(i128::from(m.fee))
+    );
+    if kind == Some(BlockKind::Normal) {
+        let lines: Vec<String> = m
+            .haiku
+            .split('\n')
+            .map(str::trim)
+            .filter(|l| !l.is_empty())
+            .map(super::terminal_text)
+            .collect();
+        if !lines.is_empty() {
+            out.push_str(&format!("  haiku    {}\n", lines.join(" / ")));
+        }
+    }
+    out
 }

@@ -108,7 +108,8 @@ pub const MAX_REQUEST_BYTES: usize = 30 * 1024;
 /// buy -- a reply that needs it is a reply this crate would refuse to parse
 /// anyway.
 pub const MAX_RECON_RESPONSE_BYTES: usize = 8 * 1024;
-/// The response-body cap for `/block` and `/search/transactions`.
+/// The response-body cap for `/block`, `/search/transactions`, `/mempool`
+/// and `/mempool/transaction`.
 ///
 /// These two scale with what they are reporting, so a single number sized from
 /// the small endpoints is a bound the CLI can walk into. Measured against the
@@ -129,6 +130,11 @@ pub const MAX_RECON_RESPONSE_BYTES: usize = 8 * 1024;
 /// renders around 87 KiB, so three of them in a block exceed this. That block
 /// gets a named refusal rather than an unbounded allocation, which is the
 /// trade a cap is.
+///
+/// The mempool's two replies scale the same way: one waiting transaction is
+/// rendered as `/block` renders one, and the queue's list is about 75 bytes
+/// an id, so this holds a list of some 3,400 ids, beyond which it is refused
+/// by size as a block is.
 pub const MAX_HISTORY_RESPONSE_BYTES: usize = 256 * 1024;
 
 /// The response cap for `path`.
@@ -139,7 +145,7 @@ pub const MAX_HISTORY_RESPONSE_BYTES: usize = 256 * 1024;
 #[must_use]
 pub fn max_response_bytes(path: &str) -> usize {
     match path {
-        "/block" | "/search/transactions" => MAX_HISTORY_RESPONSE_BYTES,
+        "/block" | "/search/transactions" | "/mempool" | "/mempool/transaction" => MAX_HISTORY_RESPONSE_BYTES,
         _ => MAX_RECON_RESPONSE_BYTES,
     }
 }
@@ -189,8 +195,9 @@ impl fmt::Debug for TxId {
     }
 }
 
-/// The client: one transport, eight operations -- four the wallet needs to
-/// spend, and four read-only ones the explorer verbs use.
+/// The client: one transport, thirteen operations -- four the wallet needs to
+/// spend, seven read-only ones the explorer verbs use, and two that say which
+/// network a node serves and how current its tip is.
 #[derive(Debug)]
 pub struct MeshClient<T: Transport> {
     transport: T,
@@ -209,6 +216,22 @@ impl<T: Transport> MeshClient<T> {
     pub fn network_status(&self) -> Result<ChainTip> {
         let reply = self.transport.post("/network/status", &codec::request_network_status())?;
         codec::parse_network_status(&reply)
+    }
+
+    /// The same `POST /network/status`, read for a page that shows the
+    /// node: the tip, when it was solved, the genesis block and the
+    /// middleware's sync state ([`codec::parse_network_status_full`]). The
+    /// sync state is the middleware's view of its own node, not of the
+    /// network; see [`codec::SyncStatus`].
+    pub fn network_status_full(&self) -> Result<codec::NetworkStatus> {
+        let reply = self.transport.post("/network/status", &codec::request_network_status())?;
+        codec::parse_network_status_full(&reply)
+    }
+
+    /// `POST /network/list`: every network the middleware serves.
+    pub fn networks(&self) -> Result<Vec<codec::NetworkIdentifier>> {
+        let reply = self.transport.post("/network/list", &codec::request_network_list())?;
+        codec::parse_network_identifiers(&reply)
     }
 
     /// `POST /call tag_resolve`: the ledger's current entry for `tag`. An
@@ -265,6 +288,45 @@ impl<T: Transport> MeshClient<T> {
             .transport
             .post("/search/transactions", &codec::request_search_by_account(tag, limit))?;
         codec::parse_search(&reply)
+    }
+
+    /// [`Self::search_by_account`] from the `offset`-th newest row on: the
+    /// rows below the newest `offset`, at most `limit` of them. A page's
+    /// [`codec::SearchPage::next_offset`] is the `offset` of the page after
+    /// it.
+    ///
+    /// `limit` is held to `1..=100` as above, and `offset` to
+    /// `0..=i64::MAX`, the handler's `int64`: above that the request does
+    /// not decode and the handler answers code 1. Rows arrive at the newest
+    /// end, so a page asked for after others have landed repeats them and
+    /// skips none.
+    pub fn search_by_account_from(&self, tag: &Tag, limit: u64, offset: u64) -> Result<codec::SearchPage> {
+        let reply = self.transport.post(
+            "/search/transactions",
+            &codec::request_search_by_account_from(tag, limit, offset),
+        )?;
+        codec::parse_search(&reply)
+    }
+
+    /// `POST /mempool`: the ids of every transaction the node's queue holds,
+    /// in the queue's order.
+    ///
+    /// The middleware reads the queue from the node's own file beside it, so
+    /// a deployment that does not run beside a node answers code 2, as an
+    /// internal error. What it lists is the node's view of what is waiting,
+    /// not the network's.
+    pub fn mempool(&self) -> Result<Vec<[u8; HASHLEN]>> {
+        let reply = self.transport.post("/mempool", &codec::request_mempool())?;
+        codec::parse_mempool(&reply)
+    }
+
+    /// `POST /mempool/transaction`: one transaction from the node's queue,
+    /// as `/block` renders one. An id the queue no longer holds is
+    /// [`Error::Mesh`] with code 3, *Transaction not found*: it has been
+    /// mined since the list was read, or dropped.
+    pub fn mempool_transaction(&self, id: &[u8; HASHLEN]) -> Result<codec::MeshTransaction> {
+        let reply = self.transport.post("/mempool/transaction", &codec::request_mempool_transaction(id))?;
+        codec::parse_mempool_transaction(&reply)
     }
 
     /// `POST /construction/submit` with the whole wire image. `Ok` means the

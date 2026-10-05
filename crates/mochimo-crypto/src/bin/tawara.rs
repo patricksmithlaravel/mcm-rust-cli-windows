@@ -260,7 +260,7 @@ fn run_from_argv(argv: &[String]) -> Result<cli::Report, args::Usage> {
         return Ok(cli::run_submit(&MeshClient::new(node), artifact));
     }
 
-    // The four read-only verbs, on the same route and for the same reason:
+    // The five read-only verbs, on the same route and for the same reason:
     // the node is the whole input, so there is nothing to unlock. `--dir` is
     // parsed and not touched.
     if inv.command.opens_no_store() {

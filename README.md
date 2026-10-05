@@ -178,9 +178,10 @@ The chain already saw the spend. `settle` only updates **your local store**: cle
 | `resign <tag> <to> <amount> [<to> <amount> …]` or `resign <tag> --destinations <path>` | Yes | Rebuild **identical** artifact and submit |
 | `submit <artifact-hex>` | Yes | Write a saved artifact to the socket as it is; opens no store, asks no password |
 | `transaction <hash>` | Yes | One transaction from the node's indexer; opens no store |
-| `recent-transactions <tag> [--count N]` | Yes | What touched a tag, newest first (N defaults to 5); opens no store |
-| `block <number \| hash>` | Yes | One block, its reward and what it moved; opens no store |
-| `blocks [--count N]` | Yes | The newest blocks, one row each (N defaults to 5); opens no store |
+| `recent-transactions <tag> [--count N] [--from M]` | Yes | What touched a tag, newest first (N defaults to 5), the M newest skipped (M defaults to 0); opens no store |
+| `block <number \| hash>` | Yes | One block: its kind, difficulty and haiku, its reward and what it moved; opens no store |
+| `blocks [--count N]` | Yes | The newest blocks, one row each with its kind (N defaults to 5); opens no store |
+| `mempool [--count N]` | Yes | The transactions the node's queue holds, the first N read whole (N defaults to 5); opens no store |
 | `status <tag> [--scan-to M]` | Yes | Report sync / divergence without failing closed |
 | `reconcile <tag> --advance-to N` | Yes | Advance after you understand a divergence |
 | `restore --account N [--scan-to M]` | Yes | Re-derive an on-chain account into the store |
@@ -242,8 +243,8 @@ Writes a saved artifact (the hex `send` printed) to the socket exactly as it is.
 **`resign`**  
 Must match the pending spend **exactly** (every destination, every amount, fee, btl, and any `--ref`). The order does not matter — the layout sorts destinations before signing — but every value must be the one that was reserved. The store keeps only the digest, not the destinations, so `resign` cannot tell you what they were: keep your own record. It reproduces the same signature bytes (WOTS+ is deterministic); it does not create a second different signature under the reserved key.
 
-**`transaction` / `recent-transactions` / `block` / `blocks`**  
-Read-only. They **open no store and ask no password**, so they work with no wallet on this machine at all; `--dir` is still required and is not touched. `--count` runs 1–100 and defaults to 5 — outside that window the Mesh quietly answers with its own default of ten rows, so a count it would ignore is refused here instead. `block 0` is refused too: the Mesh serves index 0 as the *current* block, not as genesis. Each page names the endpoint it read, because `/block` and `/search/transactions` render the same transaction differently and neither is wrong (see below).
+**`transaction` / `recent-transactions` / `block` / `blocks` / `mempool`**  
+Read-only. They **open no store and ask no password**, so they work with no wallet on this machine at all; `--dir` is still required and is not touched. `--count` runs 1–100 and defaults to 5 — outside that window the Mesh quietly answers with its own default of ten rows, so a count it would ignore is refused here instead. `recent-transactions --from M` skips the M newest rows to read further back; a page with more after it names the `--from` that reads them, and since new rows arrive at the newest end, a later page can repeat a row that landed in between but never skips one. `block 0` is refused too: the Mesh serves index 0 as the *current* block, not as genesis. Each page names the endpoint it read, because `/block` and `/search/transactions` render the same transaction differently and neither is wrong (see below).
 
 **`status`**  
 First tool when something looks wrong. It **reports** divergence instead of refusing the account.
@@ -321,7 +322,7 @@ If `status` reports a real index mismatch (not merely unresolved tag), read the 
 | `0` | Success |
 | `1` | Usage / argv error (including missing `--node` when required) |
 | `2` | Startup refused — nothing ran: bad node URL, no TTY, no entropy source, the store would not open, or **no** account reconciled |
-| `3` | The command was refused — every refusal from the eleven verbs that open no wallet at all (`create`, `address`, `discover`, `status`, `reconcile`, `restore`, `submit`, `transaction`, `recent-transactions`, `block`, `blocks`), and every refusal from a command that did open one: an account the wallet could not explain, a digest mismatch on `resign`, a `resign` whose reservation the chain has already moved past, and a socket write that failed |
+| `3` | The command was refused — every refusal from the twelve verbs that open no wallet at all (`create`, `address`, `discover`, `status`, `reconcile`, `restore`, `submit`, `transaction`, `recent-transactions`, `block`, `blocks`, `mempool`), and every refusal from a command that did open one: an account the wallet could not explain, a digest mismatch on `resign`, a `resign` whose reservation the chain has already moved past, and a socket write that failed |
 
 Success reports go to **stdout**. Non-zero reports go to **stderr**. That matters if `send` signs and then the socket write fails: the artifact may be on stderr with exit `3`.
 
