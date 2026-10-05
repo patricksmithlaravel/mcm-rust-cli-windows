@@ -397,6 +397,7 @@ fn outcome(outcome: &Outcome) -> Report {
             hex_bytes(id)
         )),
         Outcome::ExplorerFailed { cause } => Report::refused(super::explorer_refusal(cause)),
+        Outcome::SearchFailed { cause } => Report::refused(super::search_refusal(cause)),
 
         Outcome::StoreUnreadable(e) => Report {
             text: format!("{e}"),
@@ -892,7 +893,7 @@ fn recent_transactions(
     if page.transactions.is_empty() && from == 0 {
         out.push_str(
             "  (none: this node's index holds no transaction for this tag. A tag never paid has \
-             none; so has every tag when the deployment runs no indexer.)\n",
+             none.)\n",
         );
     } else if page.transactions.is_empty() {
         out.push_str(&format!(

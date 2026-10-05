@@ -1471,7 +1471,7 @@ fn metadata_lines(meta: &[(String, String)], indent: &str) -> String {
 /// `transaction <hash>`: one transaction from the indexer.
 pub fn cmd_transaction<T: Transport>(client: &MeshClient<T>, hash: &[u8; HASHLEN]) -> Outcome {
     match client.search_by_hash(hash) {
-        Err(cause) => Outcome::ExplorerFailed { cause },
+        Err(cause) => Outcome::SearchFailed { cause },
         Ok(page) if page.transactions.is_empty() => Outcome::TransactionNotFound { hash: *hash },
         Ok(page) => Outcome::LookedUpTransaction {
             page: Box::new(page),
@@ -1491,7 +1491,7 @@ pub fn cmd_recent_transactions<T: Transport>(
             from: 0,
             page: Box::new(page),
         },
-        Err(cause) => Outcome::ExplorerFailed { cause },
+        Err(cause) => Outcome::SearchFailed { cause },
     }
 }
 
@@ -1514,7 +1514,7 @@ pub fn cmd_recent_transactions_from<T: Transport>(
             from,
             page: Box::new(page),
         },
-        Err(cause) => Outcome::ExplorerFailed { cause },
+        Err(cause) => Outcome::SearchFailed { cause },
     }
 }
 
@@ -1587,18 +1587,45 @@ pub fn cmd_mempool<T: Transport>(client: &MeshClient<T>, count: u64) -> Outcome 
 /// A failed explorer read, said in the operator's terms.
 ///
 /// The Mesh answers its own failures as HTTP 200 carrying a code, which the
-/// codec has already turned into `Error::Mesh`; an internal error from
-/// `/search/transactions` most often means the deployment runs no indexer,
-/// which is its default, and saying so is the
-/// difference between a useful page and a number.
+/// codec has already turned into `Error::Mesh`; any other status is
+/// `Error::HttpStatus`.
 fn explorer_refusal(e: &Error) -> String {
+    refusal_with(e, None)
+}
+
+/// A failed search of the node's index, said in the operator's terms, with
+/// what the middleware's answer says about its indexer: the difference
+/// between a useful page and a number.
+///
+/// `mochimo-mesh` registers `/search/transactions` only when its indexer is
+/// enabled as it starts (`main.go`), and it is not unless the deployment
+/// was configured to, so a node that runs none answers that route with a
+/// 404. One that runs an indexer answers its internal error, code 2, while
+/// the indexer's database is not connected and when a search fails
+/// (`search_handler.go`). Code 1 is *Invalid request*, a body it could not
+/// decode, and says nothing about the indexer.
+fn search_refusal(e: &Error) -> String {
+    let note = match e {
+        Error::HttpStatus { status: 404 } => Some(
+            "The Mesh serves /search/transactions only when its indexer was enabled as it \
+             started, and a deployment runs no indexer unless it was configured to: this node \
+             does not index. Another may.",
+        ),
+        Error::Mesh { code: 2, .. } => Some(
+            "The Mesh answers its internal error on /search/transactions while its indexer's \
+             database is not connected and when a search fails: this node runs an indexer, and \
+             it did not answer. It may answer if asked again, and another node may.",
+        ),
+        _ => None,
+    };
+    refusal_with(e, note)
+}
+
+fn refusal_with(e: &Error, note: Option<&str>) -> String {
     let mut text = format!("{e}");
-    if matches!(e, Error::Mesh { code: 1, .. }) {
-        text.push_str(
-            "\n  The Mesh's search endpoint answers an internal error when its indexer database \
-             is not initialised, and a deployment runs no indexer unless it was configured to. \
-             This node may simply not index; another may.",
-        );
+    if let Some(note) = note {
+        text.push_str("\n  ");
+        text.push_str(note);
     }
     text.push_str("\n  Nothing was read but the node: no store was opened and no password asked.");
     text
