@@ -179,7 +179,8 @@ pub fn request_search_by_hash(hash: &[u8; HASHLEN]) -> Vec<u8> {
 /// so an out-of-range count would silently
 /// return ten rows rather than be clamped. No `offset` is sent: the rows
 /// come back `ORDER BY bm.block_height DESC, tm.id DESC`,
-/// so offset 0 already names the newest.
+/// so offset 0 already names the newest. [`request_search_by_account_from`]
+/// is the same request starting further down.
 ///
 /// No group N vector records this shape either; it is built from the Go.
 pub fn request_search_by_account(tag: &Tag, limit: u64) -> Vec<u8> {
@@ -187,6 +188,48 @@ pub fn request_search_by_account(tag: &Tag, limit: u64) -> Vec<u8> {
         "account_identifier": { "address": prefixed(tag) },
         "limit": limit,
         "network_identifier": network_identifier(),
+    }))
+}
+
+/// [`request_search_by_account`] with an `offset`: the rows from the
+/// `offset`-th newest on, skipping the `offset` newest.
+///
+/// The handler decodes `offset` into an `int64` and takes it when it is not
+/// negative (`searchTransactionsHandler`), and the indexer applies it as SQL
+/// `OFFSET` after the same newest-first ordering. A value above
+/// `i64::MAX` does not decode, and the handler answers code 1, *Invalid
+/// request*; the caller keeps to the range, as it does for `limit`.
+///
+/// The offset counts rows as they stand when the request is served. The
+/// index grows at the newest end, so a later page asked for with the
+/// `next_offset` an earlier one gave repeats the rows that arrived between
+/// the two requests and skips none.
+///
+/// The key is sent even when it is 0, so the request says what it asked
+/// for. No group N vector records this shape; it is built from the Go.
+pub fn request_search_by_account_from(tag: &Tag, limit: u64, offset: u64) -> Vec<u8> {
+    body(&json!({
+        "account_identifier": { "address": prefixed(tag) },
+        "limit": limit,
+        "network_identifier": network_identifier(),
+        "offset": offset,
+    }))
+}
+
+/// `POST /mempool` (`mempoolHandler`): every transaction id the node's
+/// queue holds.
+pub fn request_mempool() -> Vec<u8> {
+    body(&json!({ "network_identifier": network_identifier() }))
+}
+
+/// `POST /mempool/transaction` (`mempoolTransactionHandler`): one
+/// transaction from the node's queue, by id. The handler compares the id it
+/// is sent with `fmt.Sprintf("0x%x", id)` as strings, so it is sent as that
+/// spells it: `0x` and 64 lower-case hex digits.
+pub fn request_mempool_transaction(id: &[u8; HASHLEN]) -> Vec<u8> {
+    body(&json!({
+        "network_identifier": network_identifier(),
+        "transaction_identifier": { "hash": prefixed(id) },
     }))
 }
 
@@ -276,6 +319,53 @@ pub fn parse_network_list(bytes: &[u8]) -> Result<bool> {
     Ok(serves)
 }
 
+/// A network the middleware serves, as `/network/list` names it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkIdentifier {
+    pub blockchain: String,
+    pub network: String,
+}
+
+/// The most networks [`parse_network_identifiers`] copies, and the longest
+/// name it copies. `networkListHandler` lists the one identifier the
+/// middleware serves; the bounds are applied before anything is copied, as
+/// [`parse_network_options`] bounds its strings and its table.
+pub const MAX_NETWORKS: usize = 64;
+/// See [`MAX_NETWORKS`].
+pub const MAX_NETWORK_NAME_BYTES: usize = 64;
+
+/// `/network/list`: every network the middleware serves, in the reply's
+/// order. [`parse_network_list`] answers whether `{mochimo, mainnet}` is
+/// among them; this keeps the names, for a page that shows which network a
+/// node is on.
+pub fn parse_network_identifiers(bytes: &[u8]) -> Result<Vec<NetworkIdentifier>> {
+    let map = envelope(bytes, MAX_RECON_RESPONSE_BYTES)?;
+    let list = field(&map, "network_identifiers", "network_identifiers")?
+        .as_array()
+        .ok_or(Error::MeshResponse {
+            what: "network_identifiers: array",
+        })?;
+    if list.len() > MAX_NETWORKS {
+        return Err(Error::MeshResponse { what: "network_identifiers: too many" });
+    }
+    let name = |entry: &Map<String, Value>, key: &str, what: &'static str| -> Result<String> {
+        let s = string(field(entry, key, what)?, what)?;
+        if s.len() > MAX_NETWORK_NAME_BYTES {
+            return Err(Error::MeshResponse { what });
+        }
+        Ok(s.to_owned())
+    };
+    let mut out = Vec::with_capacity(list.len());
+    for entry in list {
+        let entry = object(entry, "network_identifiers[]")?;
+        out.push(NetworkIdentifier {
+            blockchain: name(entry, "blockchain", "network_identifiers[].blockchain")?,
+            network: name(entry, "network", "network_identifiers[].network")?,
+        });
+    }
+    Ok(out)
+}
+
 /// What `/network/options` declares: the three version strings and the
 /// error codes it advertises (`networkOptionsHandler` carries its own copy
 /// of the table in `handlers.go`; the two are compared in the tests).
@@ -325,7 +415,8 @@ pub fn parse_network_options(bytes: &[u8]) -> Result<NetworkOptions> {
 }
 
 /// `/network/status`: the current block. The rest of the reply (genesis,
-/// sync status, the middleware's certificate report) is not read.
+/// sync status, the middleware's certificate report) is not read here;
+/// [`parse_network_status_full`] reads the parts a page shows.
 pub fn parse_network_status(bytes: &[u8]) -> Result<ChainTip> {
     let map = envelope(bytes, MAX_RECON_RESPONSE_BYTES)?;
     tip(
@@ -334,6 +425,86 @@ pub fn parse_network_status(bytes: &[u8]) -> Result<ChainTip> {
         "current_block_identifier.index",
         "current_block_identifier.hash",
     )
+}
+
+/// `/network/status` beyond the tip: when the tip was solved, the genesis
+/// block, and the middleware's own sync state.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NetworkStatus {
+    /// `current_block_identifier`, as [`parse_network_status`] reads it.
+    pub tip: ChainTip,
+    /// `current_block_timestamp`: when the tip was solved, in milliseconds
+    /// since the epoch (its trailer's `stime`). The middleware moves it only
+    /// when its refresh sees a new tip (`RefreshSync`), so an old one says
+    /// the tip has not moved, whether because the network has not or because
+    /// the node, or the middleware's view of it, is behind.
+    pub tip_timestamp_ms: i64,
+    /// `genesis_block_identifier`: block 0 as the middleware read it from
+    /// its node when it started.
+    pub genesis: ChainTip,
+    /// `sync_status`, or `None` when the reply carries none.
+    pub sync: Option<SyncStatus>,
+}
+
+/// The middleware's own sync state: how its last refresh of its node's tip
+/// went (`RefreshSync`, `bsync.go`).
+///
+/// It is about the middleware and its one node. **It does not say whether
+/// the node is current with the network**: a node that has fallen behind
+/// answers its old tip, and the middleware, having taken it, reports itself
+/// synchronized. [`NetworkStatus::tip_timestamp_ms`] is what shows a tip
+/// that has not moved.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SyncStatus {
+    /// `stage`, in the middleware's words: `synchronized` once a refresh
+    /// has finished, `synchronizing` while one takes a new tip, or the step
+    /// that failed (`latest block error`, `min fee error` and others).
+    pub stage: String,
+    /// `synced`: whether the last refresh finished.
+    pub synced: bool,
+}
+
+/// The longest sync stage [`parse_network_status_full`] copies.
+pub const MAX_SYNC_STAGE_BYTES: usize = 64;
+
+/// `/network/status`, read for a page that shows the node: the tip, when it
+/// was solved, the genesis block, and the middleware's sync state. The tip,
+/// its timestamp and the genesis block are required, as Rosetta requires
+/// them; `sync_status` is optional there and `None` here when it is absent.
+/// The stage is capped before it is copied. `oldest_block_identifier` and
+/// `https_status` are not read.
+pub fn parse_network_status_full(bytes: &[u8]) -> Result<NetworkStatus> {
+    let map = envelope(bytes, MAX_RECON_RESPONSE_BYTES)?;
+    let current = tip(
+        &map,
+        "current_block_identifier",
+        "current_block_identifier.index",
+        "current_block_identifier.hash",
+    )?;
+    let tip_timestamp_ms = field(&map, "current_block_timestamp", "current_block_timestamp")?
+        .as_i64()
+        .ok_or(Error::MeshResponse { what: "current_block_timestamp" })?;
+    let genesis = tip(
+        &map,
+        "genesis_block_identifier",
+        "genesis_block_identifier.index",
+        "genesis_block_identifier.hash",
+    )?;
+    let sync = match map.get("sync_status") {
+        None | Some(Value::Null) => None,
+        Some(v) => {
+            let s = object(v, "sync_status")?;
+            let stage = string(field(s, "stage", "sync_status.stage")?, "sync_status.stage")?;
+            if stage.len() > MAX_SYNC_STAGE_BYTES {
+                return Err(Error::MeshResponse { what: "sync_status.stage" });
+            }
+            let synced = field(s, "synced", "sync_status.synced")?
+                .as_bool()
+                .ok_or(Error::MeshResponse { what: "sync_status.synced" })?;
+            Some(SyncStatus { stage: stage.to_owned(), synced })
+        }
+    };
+    Ok(NetworkStatus { tip: current, tip_timestamp_ms, genesis, sync })
 }
 
 /// `/call tag_resolve`: `result.address` is the full 40-byte ledger address
@@ -468,6 +639,76 @@ pub struct MeshBlock {
     pub parent: ChainTip,
     pub timestamp_ms: i64,
     pub transactions: Vec<MeshTransaction>,
+    /// The block's own figures, from its trailer; `None` when the reply
+    /// carries no `block.metadata`, or carries it without one of the eight
+    /// keys [`BlockMetadata`] reads.
+    pub metadata: Option<BlockMetadata>,
+}
+
+/// A block's own figures, as `/block` sends them in `block.metadata`.
+///
+/// `getBlock` writes eight keys, every one read from the block's trailer
+/// except the size: `block_size` (the block's length in bytes),
+/// `difficulty`, `fee` (the trailer's `mfee`), `haiku`, `nonce`, `root`
+/// (`mroot`), `stime` (in milliseconds) and `tx_count` (`tcount`). The
+/// group N capture of a sealed block carries all eight, numbers as JSON
+/// numbers and the two hashes as `0x` and 64 hex digits.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockMetadata {
+    /// The block's length in bytes, as the node holds it.
+    pub block_size: u64,
+    /// The trailer's difficulty.
+    pub difficulty: u32,
+    /// The trailer's `mfee`, the least fee a transaction in it pays, in
+    /// nanoMCM (`types.h:657`, "minimum transaction fee").
+    pub fee: u64,
+    /// The trailer's nonce expanded into words by the middleware. It is sent
+    /// for every block, and it is the solve's haiku only for a normal one:
+    /// the reference prints it for no other (`bup.c:98`).
+    pub haiku: String,
+    /// The trailer's nonce (`types.h:662`, "solving nonce of standard
+    /// blocks").
+    pub nonce: [u8; HASHLEN],
+    /// The trailer's Merkle root over the block's contents (`mroot`).
+    pub root: [u8; HASHLEN],
+    /// When the block was solved, in milliseconds since the epoch: the
+    /// trailer's `stime`, which `/block` also sends as the block's
+    /// `timestamp`.
+    pub stime_ms: i64,
+    /// The trailer's transaction count, the miner's reward not among them:
+    /// `/block` lists the reward as a transaction of its own.
+    pub tx_count: u32,
+}
+
+/// What kind of block a block is, by the reference's own test.
+///
+/// `print_bup` names a block whose trailer counts no transactions
+/// `Pseudo`, and then names a block whose number's low byte is zero
+/// `Neogen`, which wins (`bup.c:88-89`). A pseudo-block carries no
+/// transactions and no proof of work is checked for it (`bval.c:240`,
+/// `:280`); a neogenesis block carries the ledger (`bval.c:33`) and comes
+/// every 256th block; block 0 passes the same test.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BlockKind {
+    /// Transactions, solved by proof of work.
+    Normal,
+    /// No transactions.
+    Pseudo,
+    /// The ledger, at a block number whose low byte is zero.
+    Neogenesis,
+}
+
+impl MeshBlock {
+    /// The block's kind, by [`BlockKind`]'s test: from its number alone for
+    /// a neogenesis block, and otherwise from the transaction count in
+    /// [`Self::metadata`], so `None` when the node sent none.
+    pub fn kind(&self) -> Option<BlockKind> {
+        if self.block.index & 0xff == 0 {
+            return Some(BlockKind::Neogenesis);
+        }
+        let metadata = self.metadata.as_ref()?;
+        Some(if metadata.tx_count == 0 { BlockKind::Pseudo } else { BlockKind::Normal })
+    }
 }
 
 /// A page of `/search/transactions`.
@@ -530,7 +771,10 @@ fn parse_operations(v: &Value) -> Result<Vec<Operation>> {
             string(field(amount, "value", "operations[].amount.value")?, "operations[].amount.value")?,
             "operations[].amount.value",
         )?;
-        // `metadata` is absent on a REWARD and on every /search operation.
+        // `metadata` is absent on a REWARD. On /search it is present only
+        // on a destination whose stored reference is not empty
+        // (`SearchTransactions` sets `memo` from the transfer's reference
+        // and nothing else), so an operation with none carries no key.
         let memo = match op.get("metadata").and_then(Value::as_object) {
             Some(m) => match m.get("memo") {
                 Some(v) => string(v, "operations[].metadata.memo")?.to_owned(),
@@ -585,9 +829,8 @@ fn parse_transaction(map: &Map<String, Value>, with_block: bool) -> Result<MeshT
     })
 }
 
-/// `/block`: the block, its parent, its timestamp and every transaction in
-/// it. The block's own `metadata` (size, difficulty, haiku, nonce, root) is
-/// not read.
+/// `/block`: the block, its parent, its timestamp, every transaction in it,
+/// and its own figures ([`BlockMetadata`]).
 pub fn parse_block(bytes: &[u8]) -> Result<MeshBlock> {
     let map = envelope(bytes, MAX_HISTORY_RESPONSE_BYTES)?;
     let block = object(field(&map, "block", "block")?, "block")?;
@@ -611,7 +854,48 @@ pub fn parse_block(bytes: &[u8]) -> Result<MeshBlock> {
     for t in list {
         transactions.push(parse_transaction(object(t, "transactions[]")?, false)?);
     }
-    Ok(MeshBlock { block: identifier, parent, timestamp_ms, transactions })
+    let metadata = parse_block_metadata(block)?;
+    Ok(MeshBlock { block: identifier, parent, timestamp_ms, transactions, metadata })
+}
+
+/// The eight keys `getBlock` writes into `block.metadata`.
+const BLOCK_METADATA_KEYS: [&str; 8] =
+    ["block_size", "difficulty", "fee", "haiku", "nonce", "root", "stime", "tx_count"];
+
+/// The longest haiku this codec copies. The reference expands a nonce into
+/// a 256-byte buffer (`bup.c:84`), and the bound is applied before anything
+/// is copied, as every other string this codec keeps is bounded.
+pub const MAX_HAIKU_BYTES: usize = 256;
+
+/// `block.metadata`, read only when it carries all eight of
+/// [`BLOCK_METADATA_KEYS`]: a deployment that writes fewer, or none, is read
+/// as sending none, so its blocks still read. A key that is there with a
+/// value of the wrong shape is refused naming it, as any other field is.
+fn parse_block_metadata(block: &Map<String, Value>) -> Result<Option<BlockMetadata>> {
+    let m = match block.get("metadata") {
+        None | Some(Value::Null) => return Ok(None),
+        Some(v) => object(v, "metadata")?,
+    };
+    if BLOCK_METADATA_KEYS.iter().any(|k| !m.contains_key(*k)) {
+        return Ok(None);
+    }
+    let narrow = |key: &str, what: &'static str| -> Result<u32> {
+        u32::try_from(unsigned(&m[key], what)?).map_err(|_| Error::MeshResponse { what })
+    };
+    let haiku = string(&m["haiku"], "metadata.haiku")?;
+    if haiku.len() > MAX_HAIKU_BYTES {
+        return Err(Error::MeshResponse { what: "metadata.haiku: too long" });
+    }
+    Ok(Some(BlockMetadata {
+        block_size: unsigned(&m["block_size"], "metadata.block_size")?,
+        difficulty: narrow("difficulty", "metadata.difficulty")?,
+        fee: unsigned(&m["fee"], "metadata.fee")?,
+        haiku: haiku.to_owned(),
+        nonce: hex::decode_prefixed::<HASHLEN>(string(&m["nonce"], "metadata.nonce")?, "metadata.nonce")?,
+        root: hex::decode_prefixed::<HASHLEN>(string(&m["root"], "metadata.root")?, "metadata.root")?,
+        stime_ms: m["stime"].as_i64().ok_or(Error::MeshResponse { what: "metadata.stime" })?,
+        tx_count: narrow("tx_count", "metadata.tx_count")?,
+    }))
 }
 
 /// `/block/transaction`: the one transaction, without a block identifier of
@@ -620,6 +904,44 @@ pub fn parse_block_transaction(bytes: &[u8]) -> Result<MeshTransaction> {
     let map = envelope(bytes, MAX_HISTORY_RESPONSE_BYTES)?;
     let t = object(field(&map, "transaction", "transaction")?, "transaction")?;
     parse_transaction(t, false)
+}
+
+/// `/mempool`: the ids of the transactions the node's queue holds, in the
+/// queue's order.
+///
+/// The handler reads the node's queue file and lists every entry's id; for
+/// an empty queue its list is Go's nil slice, which encodes as `null`, and
+/// that is read as no transactions. A list longer than the codec's row
+/// bound is refused before anything is copied.
+pub fn parse_mempool(bytes: &[u8]) -> Result<Vec<[u8; HASHLEN]>> {
+    let map = envelope(bytes, MAX_HISTORY_RESPONSE_BYTES)?;
+    let list = match field(&map, "transaction_identifiers", "transaction_identifiers")? {
+        Value::Null => return Ok(Vec::new()),
+        Value::Array(list) => list,
+        _ => return Err(Error::MeshResponse { what: "transaction_identifiers: array" }),
+    };
+    if list.len() > MAX_ROWS {
+        return Err(Error::MeshResponse { what: "transaction_identifiers: too many" });
+    }
+    let mut ids = Vec::with_capacity(list.len());
+    for entry in list {
+        let entry = object(entry, "transaction_identifiers[]")?;
+        ids.push(hex::decode_prefixed::<HASHLEN>(
+            string(field(entry, "hash", "transaction_identifiers[].hash")?, "transaction_identifiers[].hash")?,
+            "transaction_identifiers[].hash",
+        )?);
+    }
+    Ok(ids)
+}
+
+/// `/mempool/transaction`: one transaction from the node's queue, rendered
+/// as `/block` renders one (`getTransactionsFromBlockBody`, its status
+/// `PENDING`): the source debited net, no change operation, each
+/// destination's reference. The reply is `/block/transaction`'s shape, and
+/// is read as that is. An id the queue no longer holds -- mined since, or
+/// dropped -- is answered code 3, *Transaction not found*.
+pub fn parse_mempool_transaction(bytes: &[u8]) -> Result<MeshTransaction> {
+    parse_block_transaction(bytes)
 }
 
 /// `/search/transactions`: the page, each row carrying its own block and

@@ -395,12 +395,24 @@ fn n_list(v: &mut dyn Vector) {
     assert_eq!(x.request, codec::request_network_list(), "{}: request body is not what the codec builds", v.id());
     let serves = codec::parse_network_list(&x.response).unwrap_or_else(|e| panic!("{}: {e}", v.id()));
     assert!(serves, "{}: the middleware does not list mochimo/mainnet", v.id());
+    let named = codec::parse_network_identifiers(&x.response).unwrap_or_else(|e| panic!("{}: {e}", v.id()));
+    assert_eq!(
+        named,
+        [codec::NetworkIdentifier { blockchain: "mochimo".into(), network: "mainnet".into() }],
+        "{}: the networks named are not the one the capture lists",
+        v.id()
+    );
 }
 
 fn n_status(v: &mut dyn Vector) {
     let x = exchange(v, "/network/status");
     assert_eq!(x.request, codec::request_network_status(), "{}: request body is not what the codec builds", v.id());
     let tip = codec::parse_network_status(&x.response).unwrap_or_else(|e| panic!("{}: {e}", v.id()));
+    let full = codec::parse_network_status_full(&x.response).unwrap_or_else(|e| panic!("{}: {e}", v.id()));
+    assert_eq!(full.tip, tip, "{}: the two readings of the tip differ", v.id());
+    assert_eq!(full.genesis.index, 0, "{}: the genesis block is not block 0", v.id());
+    let sync = full.sync.as_ref().unwrap_or_else(|| panic!("{}: the capture's sync_status was not read", v.id()));
+    assert!(sync.synced && sync.stage == "synchronized", "{}: the capture was taken synchronized: {sync:?}", v.id());
     let c = cross();
     assert!(
         (c.n_block_start..=c.n_block_end).contains(&tip.index),

@@ -132,6 +132,15 @@ pub struct Decided {
     pub outcome: Outcome,
 }
 
+/// One transaction of the node's queue, as `mempool` lists it: its id, and
+/// what `/mempool/transaction` answered for it, or `None` when the queue no
+/// longer held it by the time it was asked for.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MempoolRow {
+    pub id: [u8; crate::consts::HASHLEN],
+    pub transaction: Option<Box<codec::MeshTransaction>>,
+}
+
 /// What a command established. The sibling `render` module is the only thing
 /// in this crate that turns one into words.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -244,9 +253,10 @@ pub enum Outcome {
     /// The indexer holds no transaction with that hash -- which is not the
     /// same as there being none.
     TransactionNotFound { hash: [u8; crate::consts::HASHLEN] },
-    /// The indexer's rows for one tag.
+    /// The indexer's rows for one tag, the `from` newest skipped.
     RecentTransactions {
         tag: Tag,
+        from: u64,
         page: Box<codec::SearchPage>,
     },
     /// One block.
@@ -262,6 +272,16 @@ pub enum Outcome {
     },
     /// The walk stopped: the tip was read and one block below it was not.
     BlocksStopped { index: u64, cause: Error },
+    /// The node's queue: how many transactions it holds, and the first
+    /// `count` of them read whole.
+    Mempool {
+        count: u64,
+        total: usize,
+        rows: Vec<MempoolRow>,
+    },
+    /// The queue's ids were read and one transaction in it was not, for a
+    /// reason other than its having left the queue.
+    MempoolStopped { id: [u8; crate::consts::HASHLEN], cause: Error },
     /// The node could not be asked at all.
     ExplorerFailed { cause: Error },
     /// `resign` reproduced the artifact and stopped before the socket,
