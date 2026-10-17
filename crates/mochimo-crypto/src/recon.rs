@@ -115,8 +115,10 @@ use crate::consts::SEED_LEN;
 use crate::derive;
 use crate::error::{Error, Result};
 use crate::keystore::{Figures, KeyAccess, Keystore, Medium, Pending};
-use crate::mesh::{LedgerEntry, MeshClient, Transport};
+use crate::mesh::spend::verify_wots;
+use crate::mesh::{LedgerEntry, MeshClient, Transport, TxId};
 use crate::secret::Secret;
+use crate::tx::wire::Transaction;
 
 /// **The recovery ceiling**: how many positions restore's failing search walks
 /// before giving up, `0..10_000`, unless the caller sets it for one
@@ -992,12 +994,14 @@ impl fmt::Display for Divergence {
                                  digest is the only one key {} may ever give, and it is still acceptable \
                                  while the balance at the source has not moved and a non-zero block-to-live \
                                  has not passed, so a copy of the artifact held outside the \
-                                 store can be re-submitted. THIS BUILD HAS NO COMMAND THAT TURNS THE \
-                                 RETAINED BLOCK BACK INTO THOSE BYTES: the store keeps the digest, the index \
-                                 and the figures, but `resign` runs only after the wallet opens and the \
-                                 wallet refuses on this very divergence, and both re-signers read the open \
-                                 reservation, which this state leaves clear. Keep any copy of the artifact \
-                                 you have. Whether the wallet may re-open the block is not decided.",
+                                 store can be sent again. No command rebuilds these bytes, and none may: \
+                                 the store keeps the digest, the index and the figures, not the signature, \
+                                 and `resign` reads only an open reservation, which this state leaves clear. \
+                                 The library function `resubmit_reverted_settle` sends a saved copy only when \
+                                 its signed part hashes to the retained digest, its signature recovers to the \
+                                 source key, the balance at the source is the reserved one and the \
+                                 block-to-live has not passed. It refuses otherwise, signs nothing and moves \
+                                 no index. Keep any copy of the artifact you have.",
                                 s.spent_index.get(),
                                 hex20(&s.digest),
                                 s.spent_index.get(),
@@ -1577,15 +1581,7 @@ pub fn reconcile_account_with<M: Medium, T: Transport>(
                 let reservation = match figures {
                     None => Reservation::Unrecorded,
                     Some(fig) => {
-                        let expiry = if fig.blk_to_live == 0 {
-                            Expiry::NoExpiry
-                        } else {
-                            match client.network_status() {
-                                Ok(tip) if tip.index >= fig.blk_to_live => Expiry::Reached { tip: tip.index },
-                                Ok(tip) => Expiry::Below { tip: tip.index },
-                                Err(cause) => Expiry::Unreadable { cause },
-                            }
-                        };
+                        let expiry = expiry_of(client, fig.blk_to_live);
                         Reservation::Recorded(Diagnosis {
                             figures: fig,
                             balance_moved: entry.balance != fig.reserved_balance,
@@ -1715,6 +1711,145 @@ pub(crate) mod guarded {
                 store.persist_advance_to(tag, ack.target)
             }
         }
+    }
+}
+
+/// Send again a saved copy of the artifact of a settle the chain has reverted.
+///
+/// A settle is taken on one observation of the change key, so a reorg can
+/// revert it. The store then keeps the settled block (its digest, its index
+/// and its figures) but not the signature, and the wallet refuses to open.
+/// This sends the copy the operator kept, and only when every check below
+/// holds. The store is read and never written: no index moves, no
+/// reservation opens and no key signs.
+///
+/// The checks run in this order, and the first to fail refuses with nothing
+/// sent. The account must retain a settle and hold no open reservation. The
+/// settle must have recorded its figures. The saved bytes must parse as a
+/// transaction and re-serialize to exactly themselves. The signed part must
+/// hash to the retained digest. The signature must recover to the source key.
+/// The chain must hold the account at the position one behind the store, the
+/// one the settle moved past. The balance at the source must be the one the
+/// spend was built against. A non-zero block-to-live must not have been
+/// reached by the tip.
+///
+/// Returns the transaction id the node echoed.
+pub fn resubmit_reverted_settle<M: Medium, T: Transport>(
+    store: &Keystore<M>,
+    client: &MeshClient<T>,
+    tag: &Tag,
+    access: &KeyAccess<'_>,
+    saved: &[u8],
+) -> Result<TxId> {
+    let view = store.view(tag)?.ok_or(Error::NoSuchAccount)?;
+    if let Some(open) = view.pending {
+        return Err(Error::ReservationOpen {
+            spent_index: open.spent_index.get(),
+        });
+    }
+    let settled = view.settled.ok_or(Error::NotARevertedSettle {
+        what: "no settle is retained",
+    })?;
+    let figures = settled.figures.ok_or(Error::FiguresNotRecorded)?;
+
+    let tx =
+        Transaction::from_wire(saved).map_err(|cause| Error::SavedArtifactNotATransaction {
+            cause: Box::new(cause),
+        })?;
+    if tx.to_wire() != saved {
+        return Err(Error::SavedArtifactNotWhole {
+            given: saved.len(),
+            described: tx.wire_len(),
+        });
+    }
+    if tx.message_digest() != settled.digest {
+        return Err(Error::NotTheSettledSpend);
+    }
+    verify_wots(&tx)?;
+
+    // A reverted settle shows exactly one chain state, the store's position
+    // one behind, so the walk covers that position and its two neighbours.
+    // Any other answer is refused by name and never walked further.
+    let narrow = ScanScope {
+        ceiling: 0,
+        window: Some(1),
+    };
+    let balance = match reconcile_account_with(store, client, tag, access, &narrow, &Cancel::NEVER)
+    {
+        Ok(_) => {
+            return Err(Error::NotARevertedSettle {
+                what: "the chain is in sync",
+            })
+        }
+        Err(Divergence::IndexMismatch {
+            found,
+            balance,
+            reverted_settle,
+            ..
+        }) => match found {
+            ChainPosition::Behind { index, gap: 1 }
+                if index == settled.spent_index && reverted_settle == Some(settled) =>
+            {
+                balance
+            }
+            ChainPosition::Ahead { .. } => {
+                return Err(Error::NotARevertedSettle {
+                    what: "the chain is ahead of the store",
+                })
+            }
+            ChainPosition::Behind { .. } | ChainPosition::Unlocated { .. } => {
+                return Err(Error::NotARevertedSettle {
+                    what: "the chain is at another position",
+                })
+            }
+        },
+        Err(Divergence::TagUnresolved { .. }) => {
+            return Err(Error::NotARevertedSettle {
+                what: "tag unresolved by the node",
+            })
+        }
+        Err(Divergence::ChainUnreachable { .. }) => {
+            return Err(Error::NotARevertedSettle {
+                what: "the chain could not be read",
+            })
+        }
+        Err(_) => {
+            return Err(Error::NotARevertedSettle {
+                what: "the account could not be reconciled",
+            })
+        }
+    };
+
+    if balance != figures.reserved_balance {
+        return Err(Error::SettledBalanceMoved {
+            reserved: figures.reserved_balance,
+            current: balance,
+        });
+    }
+    match expiry_of(client, figures.blk_to_live) {
+        Expiry::NoExpiry | Expiry::Below { .. } => {}
+        Expiry::Reached { tip } => {
+            return Err(Error::SettledExpired {
+                blk_to_live: figures.blk_to_live,
+                tip,
+            })
+        }
+        Expiry::Unreadable { cause } => return Err(cause),
+    }
+    client.submit_wire(saved, TxId(tx.id_digest()))
+}
+
+/// The block-to-live of a recorded figure read against the tip. Zero never
+/// expires and reads no tip. A failed read is `Unreadable`, which each caller
+/// reports as unchecked; it is never read as live.
+fn expiry_of<T: Transport>(client: &MeshClient<T>, blk_to_live: u64) -> Expiry {
+    if blk_to_live == 0 {
+        return Expiry::NoExpiry;
+    }
+    match client.network_status() {
+        Ok(tip) if tip.index >= blk_to_live => Expiry::Reached { tip: tip.index },
+        Ok(tip) => Expiry::Below { tip: tip.index },
+        Err(cause) => Expiry::Unreadable { cause },
     }
 }
 

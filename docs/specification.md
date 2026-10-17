@@ -1161,7 +1161,7 @@ Every transition is one whole-snapshot rewrite through the four-step commit desc
 
 `address_at` deliberately does not refuse an open reservation: reconciliation asks for the addresses at `spent_index` and `spent_index + 1` precisely while a spend is in flight.
 
-Outside the snapshot writer, which carries every slot's two blocks forward into each new image, and the view the store hands out, the retained settled block is read in exactly one place: the divergence report's reverted-settle clause.
+Outside the snapshot writer, which carries every slot's two blocks forward into each new image, and the view the store hands out, the retained settled block is read in two places: the divergence report's reverted-settle clause, and `recon::resubmit_reverted_settle`, which checks a saved copy against it and never writes it.
 
 ### The two routes to a signature
 
@@ -1344,7 +1344,7 @@ Settling takes one observation and no confirmation depth. Settling too early cos
 
 `IndexMismatch::reverted_settle` is `Some(block)` when, and only when, `found` is `ChainPosition::Behind { index }` and the record's retained settled block has `spent_index == index`. It is `None` for an `Ahead`, an `Unlocated`, a `Behind` at any other position, and a record with no retained block.
 
-The `Behind` report then adds, to the causes it already names, that this store recorded a settle at that position and this node's answer does not show it, that two things produce that — a reorg that reverted the settling block, or a settle taken against a node that does not share this chain or had not seen it — and that it cannot tell them apart. It prints the settled position, the digest, and either both figures or that they were not recorded. It states both halves of what is true of the bytes: a copy of the artifact held outside the store can still be re-submitted while the source balance has not moved and a non-zero block-to-live has not passed, and this build has no command that turns the retained block back into those bytes, because both re-signers read the open reservation and this state leaves it clear.
+The `Behind` report then adds, to the causes it already names, that this store recorded a settle at that position and this node's answer does not show it, that two things produce that — a reorg that reverted the settling block, or a settle taken against a node that does not share this chain or had not seen it — and that it cannot tell them apart. It prints the settled position, the digest, and either both figures or that they were not recorded. It states both halves of what is true of the bytes: a copy of the artifact held outside the store can still be sent again while the source balance has not moved and a non-zero block-to-live has not passed, and no command turns the retained block back into those bytes, because both re-signers read the open reservation and this state leaves it clear. A saved copy is sent again only through `recon::resubmit_reverted_settle`, which checks it against the retained digest, the figures and the chain before its one socket write, and signs nothing. It moves no index and writes nothing to the store.
 
 #### Advancing past a divergence
 
