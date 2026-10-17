@@ -251,11 +251,12 @@ This paragraph is not a permanent delta and is not a row of the table above,
 because the change it records is not Windows-specific. `recon::resubmit_reverted_settle`
 and its refusals, the wording of the reverted-settle report in `recon.rs`, the
 doc comment on `resign_reserved` in `keystore/sign.rs`, the named exception in
-AGENT.md's I4, and the tests that pin them are a change Rep-0 would take on its
-own terms. It is held in Rep-1 pending the owner's decision on the Rep-0-first
-rule, and until that decision it is an exception to the rule above. The
-intended path is a change in Rep-0, merged down into Rep-1, with this
-paragraph removed when that merge lands.
+AGENT.md's I4, the two passages of `docs/specification.md` that describe them,
+and the tests that pin them are a change Rep-0 would take on its own terms. It
+is held in Rep-1 pending the owner's decision on the Rep-0-first rule, and until
+that decision it is an exception to the rule above. The intended path is a
+change in Rep-0, merged down into Rep-1, with this paragraph removed when that
+merge lands.
 
 #### How Rep-0 changes flow down
 
