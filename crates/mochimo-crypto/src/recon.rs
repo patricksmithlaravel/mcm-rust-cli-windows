@@ -1733,7 +1733,11 @@ pub(crate) mod guarded {
 /// spend was built against. A non-zero block-to-live must not have been
 /// reached by the tip.
 ///
-/// Returns the transaction id the node echoed.
+/// Returns the transaction id the node echoed. `submit_wire` has checked that
+/// it is the id computed from the saved bytes. The reply establishes that the
+/// bytes were written to a node's socket, and no more: it does not establish
+/// that the node accepted, validated or included the transaction. See
+/// `docs/specification.md`, "What submission establishes".
 pub fn resubmit_reverted_settle<M: Medium, T: Transport>(
     store: &Keystore<M>,
     client: &MeshClient<T>,
@@ -1767,9 +1771,11 @@ pub fn resubmit_reverted_settle<M: Medium, T: Transport>(
     }
     verify_wots(&tx)?;
 
-    // A reverted settle shows exactly one chain state, the store's position
-    // one behind, so the walk covers that position and its two neighbours.
-    // Any other answer is refused by name and never walked further.
+    // A reverted settle shows exactly one chain state: the account one
+    // position behind the store, at the spent index. The store's own position
+    // is one past the spent index, so the walk covers `spent_index` through
+    // `spent_index + 2`. Any other answer is refused by name and never walked
+    // further.
     let narrow = ScanScope {
         ceiling: 0,
         window: Some(1),
@@ -1840,8 +1846,9 @@ pub fn resubmit_reverted_settle<M: Medium, T: Transport>(
 }
 
 /// The block-to-live of a recorded figure read against the tip. Zero never
-/// expires and reads no tip. A failed read is `Unreadable`, which each caller
-/// reports as unchecked; it is never read as live.
+/// expires and reads no tip. A failed read is `Unreadable`: the diagnosis
+/// renders the expiry as unchecked, and the resubmission refuses with the
+/// cause. It is never read as live.
 fn expiry_of<T: Transport>(client: &MeshClient<T>, blk_to_live: u64) -> Expiry {
     if blk_to_live == 0 {
         return Expiry::NoExpiry;

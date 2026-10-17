@@ -2689,6 +2689,80 @@ fn a_balance_that_moved_at_the_source_refuses_and_nothing_moves() {
     );
 }
 
+/// The balance at the source fell after the spend was built: the copy is
+/// refused with both balances named, as a rise is, and nothing is sent.
+#[test]
+fn a_balance_that_fell_at_the_source_refuses_and_nothing_moves() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-fell", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit fell", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let on_disk = dir.snapshot_bytes();
+
+    // One nanoMCM less than the 5,000,000 the spend was built against.
+    let chain = reverted(0, 4_999_999);
+    chain.set_tip(4_241);
+    chain.accepts_submit(id);
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        r,
+        Err(Error::SettledBalanceMoved {
+            reserved: 5_000_000,
+            current: 4_999_999,
+        })
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "a copy the balance refuses reached the socket"
+    );
+    assert_eq!(
+        dir.snapshot_bytes(),
+        on_disk,
+        "the refusal wrote to the store"
+    );
+}
+
+/// An unreadable tip refuses a copy whose block-to-live is not zero, and the
+/// refusal is the read's own cause. Nothing reaches the socket.
+#[test]
+fn an_unreadable_tip_refuses_the_copy_with_its_cause_and_nothing_is_sent() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-tip", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit tip", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let on_disk = dir.snapshot_bytes();
+
+    let chain = reverted(0, 5_000_000);
+    chain.refuses_tip();
+    chain.accepts_submit(id);
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        r,
+        Err(Error::Transport {
+            op: "connect",
+            kind: mochimo_crypto::TransportKind::Io(std::io::ErrorKind::ConnectionRefused),
+        }),
+        "a copy whose tip could not be read was refused with another cause"
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "a copy whose tip could not be read reached the socket"
+    );
+    assert_eq!(
+        dir.snapshot_bytes(),
+        on_disk,
+        "the refusal wrote to the store"
+    );
+}
+
 /// The block-to-live is live while the tip is below it and dead when the tip
 /// reaches it, the boundary the report draws. The copy is sent only while live.
 #[test]

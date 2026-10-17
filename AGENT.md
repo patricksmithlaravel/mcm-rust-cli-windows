@@ -174,9 +174,9 @@ specification.
   reconciled. The named exception for a reverted settle is
   `recon::resubmit_reverted_settle`, which sends a saved copy of a settle the
   chain has reverted, and only under the checks that function states; it signs
-  nothing, writes nothing and moves no index. It is a free function because
-  `Wallet::open` refuses the store a reverted settle can leave behind, which is
-  the case it exists for.
+  nothing, writes nothing and moves no index. The owner approved this named
+  exception on 2026-10-16. It is a free function because `Wallet::open` refuses
+  the store a reverted settle can leave behind, which is the case it exists for.
 - **I5 -- restore derives the index from the chain, never from zero.**
 - **I6 -- key material never leaves the process readable:** zeroized on drop,
   redacted `Debug`, encrypted at rest under Argon2id + ChaCha20-Poly1305.
