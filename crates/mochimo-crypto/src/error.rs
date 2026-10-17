@@ -456,6 +456,35 @@ pub enum Error {
     /// The Mesh acknowledged a submission with a transaction id that is not
     /// the id of the bytes sent. The server parsed something else.
     SubmitIdMismatch,
+    /// `resubmit_reverted_settle`: the saved bytes do not parse as a
+    /// transaction. Nothing was submitted.
+    SavedArtifactNotATransaction { cause: Box<Error> },
+    /// `resubmit_reverted_settle`: the saved bytes parse, but they are not the
+    /// whole image of the transaction they describe. A partial trailer is
+    /// zero-extended on decode, so sending the bytes given would send other
+    /// bytes than the ones held.
+    SavedArtifactNotWhole { given: usize, described: usize },
+    /// `resubmit_reverted_settle`: the signed part of the saved bytes does not
+    /// hash to the digest the store retained at settle.
+    NotTheSettledSpend,
+    /// `resubmit_reverted_settle`: the settle was recorded before format
+    /// version 4 kept the balance and the block-to-live, so the store cannot
+    /// tell whether the saved bytes can still land.
+    FiguresNotRecorded,
+    /// `resubmit_reverted_settle` on an account with a reservation open. There
+    /// is no retained settle to send again, and the open reservation is the
+    /// one `resign` rebuilds.
+    ReservationOpen { spent_index: u32 },
+    /// `resubmit_reverted_settle`: the chain does not show the retained settle
+    /// reverted. `what` names what the chain shows instead.
+    NotARevertedSettle { what: &'static str },
+    /// `resubmit_reverted_settle`: the balance at the source is not the one the
+    /// settled spend was built against, so the saved bytes can no longer be
+    /// accepted.
+    SettledBalanceMoved { reserved: u64, current: u64 },
+    /// `resubmit_reverted_settle`: the tip has reached the block-to-live of the
+    /// settled spend, so the saved bytes can no longer be included.
+    SettledExpired { blk_to_live: u64, tip: u64 },
 }
 
 impl fmt::Display for Error {
@@ -810,6 +839,48 @@ impl fmt::Display for Error {
                 "the mesh acknowledged a transaction id that is not the id of the bytes sent; \
                  the server parsed something else, and its acknowledgement says nothing about \
                  this transaction",
+            ),
+            Error::SavedArtifactNotATransaction { cause } => write!(
+                f,
+                "the saved artifact does not parse as a transaction: {cause}. Nothing was submitted."
+            ),
+            Error::SavedArtifactNotWhole { given, described } => write!(
+                f,
+                "the saved artifact is {given} bytes but the transaction it describes is {described}: \
+                 a partial trailer is zero-extended on decode, so the bytes sent would not be the bytes \
+                 held. Nothing was submitted."
+            ),
+            Error::NotTheSettledSpend => f.write_str(
+                "the saved artifact's signed part is not the spend this account settled: its digest is \
+                 not the one this store retained at settle. A copy of another spend, or one from another \
+                 store on this seed, is refused here. Nothing was submitted and nothing was signed."
+            ),
+            Error::FiguresNotRecorded => f.write_str(
+                "this settle was recorded before format version 4 kept its balance and block-to-live, so \
+                 this store cannot tell whether the saved artifact can still land. Nothing was submitted."
+            ),
+            Error::ReservationOpen { spent_index } => write!(
+                f,
+                "key {spent_index} is reserved for a spend that has not settled, so there is no retained \
+                 settle to send again. `resign` rebuilds the artifact of an open reservation. Nothing was \
+                 submitted."
+            ),
+            Error::NotARevertedSettle { what } => write!(
+                f,
+                "the chain does not show this account's retained settle reverted ({what}). Nothing was \
+                 submitted."
+            ),
+            Error::SettledBalanceMoved { reserved, current } => write!(
+                f,
+                "the balance at the source is {current} nanoMCM, not the {reserved} the settled spend was \
+                 built against, so the saved artifact can no longer be accepted. Nothing was submitted. \
+                 This store will not sign with that key again, so the funds at its address cannot move \
+                 from this store."
+            ),
+            Error::SettledExpired { blk_to_live, tip } => write!(
+                f,
+                "block-to-live {blk_to_live} has been reached at tip {tip}, so the saved artifact can no \
+                 longer be included. Nothing was submitted. This store will not sign with that key again."
             ),
         }
     }

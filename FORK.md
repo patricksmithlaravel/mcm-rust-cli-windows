@@ -245,6 +245,24 @@ practice means anything that only makes sense with Windows in the tree. That
 goes in Rep-1 and is written into the table above as a permanent delta, so the
 list of things the two trees disagree about stays knowable.
 
+#### A change held in Rep-1 that Rep-0 would accept
+
+This paragraph is not a permanent delta and is not a row of the table above,
+because the change it records is not Windows-specific. `recon::resubmit_reverted_settle`
+and its refusals, the wording of the reverted-settle report in `recon.rs`, the
+doc comment on `resign_reserved` in `keystore/sign.rs`, the named exception in
+AGENT.md's I4, the two passages of `docs/specification.md` that describe them,
+and the tests that pin them are a change Rep-0 would take on its own terms.
+
+**Waiver (owner, 2026-10-16), for this change only.** The Rep-0-first rule, under
+which a change outside the set Rep-1 may change is made in Rep-0 first, is waived
+for the change this paragraph describes, which stays in Rep-1 as a held
+exception. The waiver covers that change as described here and nothing else: a
+later edit to the same function, any change to the raw `submit` route, and any
+other item of this table still go to Rep-0 first. The raw
+`submit <artifact-hex>` route stays as it is. The intended path is a change in
+Rep-0, merged down into Rep-1, with this paragraph removed when that merge lands.
+
 #### How Rep-0 changes flow down
 
 Rep-0 is upstream and never merges from anywhere. Rep-1 merges from Rep-0.

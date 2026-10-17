@@ -128,6 +128,9 @@ pub struct Chain {
     submit_id: RefCell<Option<[u8; 32]>>,
     /// When set, `/construction/submit` fails at the socket instead.
     submit_fails: RefCell<bool>,
+    /// When set, `/network/status` fails at the socket instead, as a node that
+    /// cannot be reached does.
+    tip_fails: RefCell<bool>,
     /// Every body posted to `/construction/submit`, accepted or refused,
     /// behind a handle the test keeps.
     ///
@@ -159,6 +162,7 @@ impl Chain {
             submit_fails: RefCell::new(false),
             submits: Rc::new(RefCell::new(Vec::new())),
             tip: RefCell::new(None),
+            tip_fails: RefCell::new(false),
         }
     }
 
@@ -177,6 +181,11 @@ impl Chain {
     /// Script the tip `/network/status` reports.
     pub fn set_tip(&self, index: u64) {
         *self.tip.borrow_mut() = Some(index);
+    }
+
+    /// Fail the tip read at the socket, as a node that cannot be reached does.
+    pub fn refuses_tip(&self) {
+        *self.tip_fails.borrow_mut() = true;
     }
 
     /// Echo `id` from `/construction/submit`.
@@ -276,6 +285,12 @@ impl Transport for Chain {
             };
         }
         if path == "/network/status" {
+            if *self.tip_fails.borrow() {
+                return Err(Error::Transport {
+                    op: "connect",
+                    kind: mochimo_crypto::TransportKind::Io(std::io::ErrorKind::ConnectionRefused),
+                });
+            }
             if let Some(index) = *self.tip.borrow() {
                 return Ok(format!(
                     r#"{{"current_block_identifier":{{"index":{index},"hash":"0x{}"}},"sync_status":{{"stage":"synchronized","synced":true}}}}"#,

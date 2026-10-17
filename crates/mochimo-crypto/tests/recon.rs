@@ -40,15 +40,15 @@ use chain::{access, addr_at, hexs, master, pos, tag1, Chain, ChainState, ADDRESS
 use keystore_harness::{reopen, ScratchDir};
 use mochimo_crypto::account::{Account, WotsIndex};
 use mochimo_crypto::consts::{ADDR_TAG_LEN, MFEE};
-use mochimo_crypto::keystore::{Disk, Figures, Keystore, Pending};
-use mochimo_crypto::mesh::MeshClient;
+use mochimo_crypto::keystore::{Disk, Figures, KeyAccess, Keystore, Pending};
+use mochimo_crypto::mesh::{MeshClient, TxId};
 use mochimo_crypto::recon::{
     self, AccountStatus, Cancel, ChainPosition, Diagnosis, Divergence, Expiry, Reservation,
     RestoreFailure, ScanScope, StoppedBy, Unfinished, DIVERGENCE_WINDOW, RECOVERY_CEILING,
 };
-use mochimo_crypto::tx::wire::Destination;
+use mochimo_crypto::tx::wire::{Destination, Transaction};
 use mochimo_crypto::wallet::{OperatorAcknowledgement, Refused, Settlement, StartupRefusal, Unopened, Wallet};
-use mochimo_crypto::{addr, derive, Error};
+use mochimo_crypto::{addr, derive, Error, Secret};
 
 /// A store holding `F-address-widths`' derived account 0, at position 0.
 fn store(name: &str) -> (ScratchDir, Keystore) {
@@ -910,7 +910,7 @@ fn a_settled_block_does_not_block_the_next_spend_and_is_overwritten_by_it() {
 /// carries `reverted_settle: None` and none of the new sentences.
 #[test]
 fn a_reverted_settle_is_reported_behind_with_the_retained_block_and_every_cause() {
-    const SENTENCES: [&str; 4] = ["recorded a SETTLE", "may yet land", "NO COMMAND", "Keep any copy"];
+    const SENTENCES: [&str; 4] = ["recorded a SETTLE", "may yet land", "resubmit", "Keep any copy"];
     let m = master();
     let dsts = || {
         vec![Destination {
@@ -965,7 +965,7 @@ fn a_reverted_settle_is_reported_behind_with_the_retained_block_and_every_cause(
         "does not share this chain",
         "may yet land",
         "only one key 0 may ever give",
-        "NO COMMAND",
+        "resubmit_reverted_settle",
         "Keep any copy",
         "wait for the spend to land and reconcile again",
         "1 BEHIND local",
@@ -2355,4 +2355,625 @@ fn a_cancelled_open_hands_back_the_store_and_the_client_as_a_refused_one_does() 
     let w = Wallet::open_or_return_with(kept, kept_client, Some(&m), &Cancel::NEVER)
         .unwrap_or_else(|u| panic!("the parts a refusal handed back did not open: {:?}", u.why));
     assert_eq!(w.accounts().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// Sending a saved copy of a reverted settle again
+// ---------------------------------------------------------------------------
+
+/// Pay `amount` nanoMCM to the destination every spend in this section uses.
+fn pay(amount: u64) -> Vec<Destination> {
+    vec![Destination {
+        tag: [0x6b; ADDR_TAG_LEN],
+        reference: [0; 16],
+        amount,
+    }]
+}
+
+/// A store named `name` whose one account sits at position `at`, with a spend
+/// of `amount` reserved from it at block-to-live `btl`. The chain holds the
+/// account at `at` with 5,000,000 nanoMCM and its tip at 4,241. Returns the
+/// store's directory, the wallet still holding the store, and the artifact the
+/// wallet signed with the id it computed for it.
+fn reserved_spend(
+    name: &str,
+    at: u32,
+    btl: u64,
+    amount: u64,
+) -> (ScratchDir, Wallet<Disk, Chain>, Vec<u8>, [u8; 32]) {
+    let m = master();
+    let (dir, mut ks) = store(name);
+    if at > 0 {
+        let _ = ks
+            .persist_advance_to(&TAG, pos(at))
+            .unwrap_or_else(|e| panic!("{e}"));
+    }
+    let chain = Chain::new(&[(TAG, ChainState::At(addr_at(at), 5_000_000))]);
+    chain.set_tip(4_241);
+    let mut w =
+        Wallet::open(ks, MeshClient::new(chain), Some(&m)).unwrap_or_else(|e| panic!("{e}"));
+    let plan = w
+        .plan(&TAG, &access(&m), pay(amount), MFEE, btl)
+        .unwrap_or_else(|e| panic!("plan: {e}"));
+    let signed = w
+        .reserve_and_sign(&plan, access(&m))
+        .unwrap_or_else(|e| panic!("reserve_and_sign: {e}"));
+    (dir, w, signed.wire(), signed.id().0)
+}
+
+/// [`reserved_spend`], then settled: the chain moves to the change key, which
+/// takes one observation. The wallet is dropped, so the store is closed and
+/// the caller reopens it from disk, as a later process would.
+fn settled_spend(name: &str, at: u32, btl: u64, amount: u64) -> (ScratchDir, Vec<u8>, [u8; 32]) {
+    let m = master();
+    let (dir, mut w, saved, id) = reserved_spend(name, at, btl, amount);
+    w.client()
+        .transport()
+        .set(TAG, ChainState::At(addr_at(at + 1), 4_000_000));
+    let settled = w
+        .settle_if_landed(&TAG, &access(&m))
+        .unwrap_or_else(|e| panic!("settle: {e}"));
+    assert!(
+        matches!(settled, Settlement::Settled { .. }),
+        "the change key did not settle: {settled:?}"
+    );
+    drop(w);
+    (dir, saved, id)
+}
+
+/// The chain as a reverted settle leaves it: the account back at `at`.
+fn reverted(at: u32, balance: u64) -> Chain {
+    Chain::new(&[(TAG, ChainState::At(addr_at(at), balance))])
+}
+
+/// A reverted settle with every check holding is sent once, as the saved
+/// bytes, and nothing else moves: the account reads the same afterwards, the
+/// snapshot on disk is the same, and the chain was asked three things, the
+/// resolve, the tip and the submit.
+#[test]
+fn a_reverted_settle_is_resubmitted_as_the_saved_bytes_and_nothing_else_moves() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-ok", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit ok", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let view = ks.view(&TAG).unwrap_or_else(|e| panic!("{e}"));
+    let on_disk = dir.snapshot_bytes();
+
+    let chain = reverted(0, 5_000_000);
+    chain.set_tip(4_241);
+    chain.accepts_submit(id);
+    let calls = chain.call_count();
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    let sent = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved)
+        .unwrap_or_else(|e| panic!("every check holds, and the saved copy was refused: {e}"));
+    assert_eq!(
+        sent,
+        TxId(id),
+        "the node echoed an id other than the one the copy carries"
+    );
+
+    let bodies = log.borrow();
+    assert_eq!(
+        bodies.len(),
+        1,
+        "the socket saw {} write(s); one saved copy is one write",
+        bodies.len()
+    );
+    let body: serde_json::Value =
+        serde_json::from_slice(&bodies[0]).unwrap_or_else(|e| panic!("{e}"));
+    assert_eq!(
+        body["signed_transaction"].as_str(),
+        Some(hexs(&saved).as_str()),
+        "the body on the socket is not the saved bytes"
+    );
+    drop(bodies);
+    assert_eq!(
+        calls.get(),
+        3,
+        "the chain was asked {} time(s); the resolve, the tip and the submit are three",
+        calls.get()
+    );
+    assert_eq!(
+        ks.view(&TAG).unwrap_or_else(|e| panic!("{e}")),
+        view,
+        "the store's account moved"
+    );
+    assert_eq!(
+        dir.snapshot_bytes(),
+        on_disk,
+        "the store's snapshot changed on disk"
+    );
+}
+
+/// A copy of another spend, valid on its own terms and signed from this seed,
+/// is refused as not the settled spend, and nothing reaches the chain.
+#[test]
+fn a_valid_copy_of_another_spend_is_refused_as_not_the_settled_spend_before_the_chain_is_asked() {
+    let m = master();
+    let (dir, _saved, _id) = settled_spend("recon-resubmit-other", 0, 4_242, 1_000_000);
+    let (_other_dir, _other_wallet, other, _other_id) =
+        reserved_spend("recon-resubmit-other-spend", 0, 4_242, 2_000_000);
+    let ks = reopen("recon resubmit other", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let chain = reverted(0, 5_000_000);
+    chain.set_tip(4_241);
+    let calls = chain.call_count();
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &other);
+    assert_eq!(
+        r,
+        Err(Error::NotTheSettledSpend),
+        "another spend was not refused as not the settled one"
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "the chain was asked about a copy that was refused locally"
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "a copy of another spend reached the socket"
+    );
+}
+
+/// A copy whose signature has one byte flipped keeps its layout and its
+/// digest, so the signature check is the one that refuses it, before the
+/// chain is asked anything.
+#[test]
+fn a_flipped_signature_byte_is_refused_by_the_signature_check_and_nothing_is_sent() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-signature", 0, 4_242, 1_000_000);
+    let tx = Transaction::from_wire(&saved).unwrap_or_else(|e| panic!("{e}"));
+    let mut flipped = saved.clone();
+    flipped[tx.dsa_off() + 7] ^= 0x01;
+    let ks = reopen("recon resubmit signature", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let chain = reverted(0, 5_000_000);
+    chain.set_tip(4_241);
+    chain.accepts_submit(id);
+    let calls = chain.call_count();
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &flipped);
+    assert!(
+        matches!(&r, Err(Error::SignatureDoesNotRecover { .. })),
+        "a flipped signature byte was not refused by the signature check: {r:?}"
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "the chain was asked about a copy whose signature does not recover"
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "a copy whose signature does not recover reached the socket"
+    );
+}
+
+/// Bytes that are not the whole image of their transaction are refused as
+/// not whole, and bytes that do not parse at all as not a transaction. Both
+/// refusals come before the chain is asked and before anything is sent.
+#[test]
+fn saved_bytes_that_are_not_a_whole_transaction_are_refused_before_the_chain_is_asked() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-whole", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit whole", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let chain = reverted(0, 5_000_000);
+    chain.set_tip(4_241);
+    chain.accepts_submit(id);
+    let calls = chain.call_count();
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    let truncated = &saved[..saved.len() - 2];
+    match recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), truncated) {
+        Err(Error::SavedArtifactNotWhole { given, described }) => {
+            assert_eq!(
+                (given, described),
+                (saved.len() - 2, saved.len()),
+                "the lengths named are not the copy's"
+            );
+        }
+        other => panic!("a truncated copy was not refused as not whole: {other:?}"),
+    }
+    let junk: [u8; 2] = [0x00, 0xff];
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &junk);
+    assert!(
+        matches!(&r, Err(Error::SavedArtifactNotATransaction { .. })),
+        "bytes that are not a transaction were not refused as such: {r:?}"
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "the chain was asked about bytes refused locally"
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "bytes refused locally reached the socket"
+    );
+}
+
+/// A settle recorded under format version 3 carries no figures, so its balance
+/// and block-to-live cannot be checked and the copy is refused before anything
+/// is read. The fixture's reservation is the version-3 image the keystore tests
+/// read, settled here by the first write a version-4 store would make.
+#[test]
+fn a_settle_recorded_before_format_version_4_is_refused_for_want_of_figures() {
+    const IMAGE: &[u8] = include_bytes!("../testdata/keystore_v3_reserved_snapshot.bin");
+    let master = Secret::new(keystore_harness::IMPORTED_MASTER);
+    let dir = ScratchDir::new("recon-resubmit-v3");
+    drop(keystore_harness::create(dir.path()).unwrap_or_else(|e| panic!("{e}")));
+    dir.write_snapshot(IMAGE);
+    let mut ks = keystore_harness::open(dir.path()).unwrap_or_else(|e| panic!("{e}"));
+    ks.persist_settled(&keystore_harness::IMPORTED_TAG)
+        .unwrap_or_else(|e| panic!("{e}"));
+    let settled = ks
+        .view(&keystore_harness::IMPORTED_TAG)
+        .unwrap_or_else(|e| panic!("{e}"))
+        .and_then(|v| v.settled);
+    assert!(
+        matches!(settled, Some(Pending { figures: None, .. })),
+        "the migrated settle is not retained without figures: {settled:?}"
+    );
+
+    let chain = Chain::new(&[]);
+    let calls = chain.call_count();
+    let client = MeshClient::new(chain);
+    let junk: [u8; 2] = [0x00, 0xff];
+    let r = recon::resubmit_reverted_settle(
+        &ks,
+        &client,
+        &keystore_harness::IMPORTED_TAG,
+        &KeyAccess::Master(&master),
+        &junk,
+    );
+    assert_eq!(
+        r,
+        Err(Error::FiguresNotRecorded),
+        "a settle without figures was not refused for want of them"
+    );
+    assert_eq!(
+        calls.get(),
+        0,
+        "the chain was asked about a settle with no figures"
+    );
+}
+
+/// The balance at the source moved after the spend was built: the copy can no
+/// longer be accepted, the refusal names both balances, and nothing is sent.
+#[test]
+fn a_balance_that_moved_at_the_source_refuses_and_nothing_moves() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-balance", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit balance", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let on_disk = dir.snapshot_bytes();
+
+    // One nanoMCM more than the 5,000,000 the spend was built against.
+    let chain = reverted(0, 5_000_001);
+    chain.set_tip(4_241);
+    chain.accepts_submit(id);
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        r,
+        Err(Error::SettledBalanceMoved {
+            reserved: 5_000_000,
+            current: 5_000_001,
+        })
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "a copy the balance refuses reached the socket"
+    );
+    assert_eq!(
+        dir.snapshot_bytes(),
+        on_disk,
+        "the refusal wrote to the store"
+    );
+}
+
+/// The balance at the source fell after the spend was built: the copy is
+/// refused with both balances named, as a rise is, and nothing is sent.
+#[test]
+fn a_balance_that_fell_at_the_source_refuses_and_nothing_moves() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-fell", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit fell", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let on_disk = dir.snapshot_bytes();
+
+    // One nanoMCM less than the 5,000,000 the spend was built against.
+    let chain = reverted(0, 4_999_999);
+    chain.set_tip(4_241);
+    chain.accepts_submit(id);
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        r,
+        Err(Error::SettledBalanceMoved {
+            reserved: 5_000_000,
+            current: 4_999_999,
+        })
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "a copy the balance refuses reached the socket"
+    );
+    assert_eq!(
+        dir.snapshot_bytes(),
+        on_disk,
+        "the refusal wrote to the store"
+    );
+}
+
+/// An unreadable tip refuses a copy whose block-to-live is not zero, and the
+/// refusal is the read's own cause. Nothing reaches the socket.
+#[test]
+fn an_unreadable_tip_refuses_the_copy_with_its_cause_and_nothing_is_sent() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-tip", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit tip", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let on_disk = dir.snapshot_bytes();
+
+    let chain = reverted(0, 5_000_000);
+    chain.refuses_tip();
+    chain.accepts_submit(id);
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        r,
+        Err(Error::Transport {
+            op: "connect",
+            kind: mochimo_crypto::TransportKind::Io(std::io::ErrorKind::ConnectionRefused),
+        }),
+        "a copy whose tip could not be read was refused with another cause"
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "a copy whose tip could not be read reached the socket"
+    );
+    assert_eq!(
+        dir.snapshot_bytes(),
+        on_disk,
+        "the refusal wrote to the store"
+    );
+}
+
+/// The block-to-live is live while the tip is below it and dead when the tip
+/// reaches it, the boundary the report draws. The copy is sent only while live.
+#[test]
+fn block_to_live_is_live_below_the_tip_and_dead_at_it() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-expiry", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit expiry", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let chain = reverted(0, 5_000_000);
+    chain.accepts_submit(id);
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+
+    client.transport().set_tip(4_241);
+    let live = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        live,
+        Ok(TxId(id)),
+        "a tip one below the block-to-live refused the copy: {live:?}"
+    );
+
+    client.transport().set_tip(4_242);
+    let dead = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        dead,
+        Err(Error::SettledExpired {
+            blk_to_live: 4_242,
+            tip: 4_242
+        })
+    );
+    assert_eq!(
+        log.borrow().len(),
+        1,
+        "the expired copy reached the socket: {} write(s) in all",
+        log.borrow().len()
+    );
+}
+
+/// A zero block-to-live never expires, so the copy is sent without a tip being
+/// read: the chain is given no tip here, and a read of one would be refused.
+#[test]
+fn a_zero_block_to_live_reads_no_tip() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-no-expiry", 0, 0, 1_000_000);
+    let ks = reopen("recon resubmit no expiry", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let chain = reverted(0, 5_000_000);
+    chain.accepts_submit(id);
+    let calls = chain.call_count();
+    let client = MeshClient::new(chain);
+
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        r,
+        Ok(TxId(id)),
+        "a zero block-to-live refused the copy: {r:?}"
+    );
+    assert_eq!(
+        calls.get(),
+        2,
+        "a zero block-to-live read the tip: the resolve and the submit are two"
+    );
+}
+
+/// An open reservation is the state `resign` rebuilds from, not one a saved
+/// copy is sent for. It is refused before the chain is asked.
+#[test]
+fn an_open_reservation_is_resign_not_resubmission() {
+    let m = master();
+    let (_dir, ks) = reserved("recon-resubmit-open");
+    let chain = Chain::new(&[(TAG, ChainState::At(addr_at(0), 5))]);
+    let calls = chain.call_count();
+    let client = MeshClient::new(chain);
+
+    let junk: [u8; 2] = [0x00, 0xff];
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &junk);
+    assert_eq!(r, Err(Error::ReservationOpen { spent_index: 0 }));
+    assert_eq!(calls.get(), 0, "an open reservation asked the chain");
+}
+
+/// A chain that is not behind the settled position by exactly one is not a
+/// reverted settle, and nothing is sent. In sync means the change key holds
+/// the tag; ahead means a spend this store does not record; two behind is a
+/// settle at position 1 with the chain back at 0.
+#[test]
+fn a_chain_in_sync_ahead_or_two_behind_is_not_a_reverted_settle_and_nothing_is_sent() {
+    let m = master();
+
+    let (dir, saved, id) = settled_spend("recon-resubmit-in-sync", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit in sync", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let chain = Chain::new(&[(TAG, ChainState::At(addr_at(1), 4_000_000))]);
+    chain.set_tip(4_241);
+    chain.accepts_submit(id);
+    let log = chain.submit_log();
+    let client = MeshClient::new(chain);
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        r,
+        Err(Error::NotARevertedSettle {
+            what: "the chain is in sync"
+        })
+    );
+    client
+        .transport()
+        .set(TAG, ChainState::At(addr_at(2), 3_000_000));
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert_eq!(
+        r,
+        Err(Error::NotARevertedSettle {
+            what: "the chain is ahead of the store"
+        })
+    );
+    assert!(
+        log.borrow().is_empty(),
+        "a chain that is not reverted received a copy"
+    );
+    drop(client);
+    drop(ks);
+
+    let (dir2, saved2, id2) = settled_spend("recon-resubmit-two-behind", 1, 4_242, 1_000_000);
+    let ks2 = reopen("recon resubmit two behind", dir2.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let chain2 = reverted(0, 5_000_000);
+    chain2.set_tip(4_241);
+    chain2.accepts_submit(id2);
+    let log2 = chain2.submit_log();
+    let client2 = MeshClient::new(chain2);
+    let r = recon::resubmit_reverted_settle(&ks2, &client2, &TAG, &access(&m), &saved2);
+    assert_eq!(
+        r,
+        Err(Error::NotARevertedSettle {
+            what: "the chain is at another position"
+        })
+    );
+    assert!(
+        log2.borrow().is_empty(),
+        "a chain two behind received a copy"
+    );
+}
+
+/// A socket write that fails leaves the store as it was: the refusal is the
+/// transport's, and the account and its snapshot read the same afterwards.
+#[test]
+fn a_failed_socket_write_leaves_the_store_as_it_was() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-socket", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit socket", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+    let view = ks.view(&TAG).unwrap_or_else(|e| panic!("{e}"));
+    let on_disk = dir.snapshot_bytes();
+
+    let chain = reverted(0, 5_000_000);
+    chain.set_tip(4_241);
+    chain.accepts_submit(id);
+    chain.refuses_submit();
+    let client = MeshClient::new(chain);
+
+    let r = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved);
+    assert!(
+        matches!(&r, Err(Error::Transport { .. })),
+        "a refused socket write did not come back as a transport refusal: {r:?}"
+    );
+    assert_eq!(
+        ks.view(&TAG).unwrap_or_else(|e| panic!("{e}")),
+        view,
+        "the failed write moved the account"
+    );
+    assert_eq!(
+        dir.snapshot_bytes(),
+        on_disk,
+        "the failed write changed the snapshot"
+    );
+}
+
+/// The copy lands: the chain then shows the change key, the account reads in
+/// sync, and the wallet opens on it as it does for any settled spend.
+#[test]
+fn a_saved_copy_that_lands_brings_the_account_back_in_sync_and_the_wallet_opens() {
+    let m = master();
+    let (dir, saved, id) = settled_spend("recon-resubmit-lands", 0, 4_242, 1_000_000);
+    let ks = reopen("recon resubmit lands", dir.path())
+        .result
+        .unwrap_or_else(|e| panic!("{e}"));
+
+    let chain = reverted(0, 5_000_000);
+    chain.set_tip(4_241);
+    chain.accepts_submit(id);
+    let client = MeshClient::new(chain);
+
+    let sent = recon::resubmit_reverted_settle(&ks, &client, &TAG, &access(&m), &saved)
+        .unwrap_or_else(|e| panic!("the copy was refused: {e}"));
+    assert_eq!(sent, TxId(id));
+
+    client
+        .transport()
+        .set(TAG, ChainState::At(addr_at(1), 4_000_000));
+    let w = Wallet::open(ks, client, Some(&m))
+        .unwrap_or_else(|e| panic!("the account did not reopen after the copy landed: {e}"));
+    assert_eq!(w.accounts().len(), 1);
+    assert!(
+        matches!(w.accounts()[0].1, AccountStatus::InSync { .. }),
+        "the landed account is not in sync: {:?}",
+        w.accounts()[0].1
+    );
+    assert_eq!(w.accounts()[0].1.index(), pos(1));
 }

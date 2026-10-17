@@ -176,10 +176,11 @@ impl<M: Medium> Keystore<M> {
     /// No receipt: nothing advances, nothing persists, `&self`. A receipt
     /// witnesses an advance and there is no advance to witness.
     ///
-    /// It reads the OPEN reservation and never the retained settled block:
-    /// whether the wallet may re-open a settled block
-    /// after a reverted settle is not decided, and the `Behind` report says
-    /// so in as many words.
+    /// It reads the OPEN reservation and never the retained settled block. A
+    /// retained block is sent again as the saved bytes it was signed into.
+    /// `recon::resubmit_reverted_settle` is the checked route to that, and signs
+    /// nothing. The raw `submit` verb also writes saved bytes to the socket,
+    /// checking their layout only.
     pub fn resign_reserved(&self, tag: &Tag, access: &KeyAccess<'_>) -> Result<SpendSignature> {
         let (_, slots) = self.live()?;
         let slot: &Slot = slots.get(tag).ok_or(Error::NoSuchAccount)?;
