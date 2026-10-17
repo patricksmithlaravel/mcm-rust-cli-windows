@@ -102,16 +102,19 @@
 //! Cost: workspace MSRV 1.77 → 1.89.
 //!
 //! **On Windows the same call is `LockFileEx`**, exclusive and failing
-//! immediately, over a range no file reaches, and the property above survives
-//! it: the system releases a terminated process's locks, so the lock file is
-//! never the remedy there either, and a second open in the same process is
-//! refused as it is by `flock`. Microsoft's own note on it adds one residue:
-//! the release follows termination after a time that "depends upon available
-//! system resources". A lock can therefore outlive its holder briefly, which
-//! an operator meets as `Locked` from a process that has already exited -- a
-//! refusal, and so the fail-closed direction, gone on a retry. Whether an SMB
-//! share honours the lock between machines is not established, which is the
-//! NFS residue in its Windows form.
+//! immediately. `File::try_lock` takes no offset or length, so the lock covers
+//! the whole range, and Windows enforces it against other handles: while the
+//! store is open, another handle's read of `keystore.lock` fails with
+//! `ERROR_LOCK_VIOLATION` (33). Nothing in the library reads the file's
+//! contents. The property above survives it: the system releases a terminated
+//! process's locks, so the lock file is never the remedy there either, and a
+//! second open in the same process is refused as it is by `flock`. Microsoft's
+//! own note on it adds one residue: the release follows termination after a
+//! time that "depends upon available system resources". A lock can therefore
+//! outlive its holder briefly, which an operator meets as `Locked` from a
+//! process that has already exited -- a refusal, and so the fail-closed
+//! direction, gone on a retry. Whether an SMB share honours the lock between
+//! machines is not established, which is the NFS residue in its Windows form.
 //!
 //! **The file's existence means nothing, and nothing reads it as meaning
 //! something.** Every refusal `open` makes after the `Missing` check
